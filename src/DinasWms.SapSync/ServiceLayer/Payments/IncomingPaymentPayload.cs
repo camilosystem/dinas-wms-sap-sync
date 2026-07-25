@@ -59,9 +59,9 @@ public sealed class IncomingPaymentPayload
     public string? TransferReference { get; set; }
 
     /// <summary>
-    /// Texto libre. Se usa para dejar rastro del pago del middleware
-    /// (<c>payment_uuid</c>), que es lo que permitirá auditar y detectar
-    /// duplicados más adelante.
+    /// Rastro del pago del middleware. <b>Siempre lleva el <c>payment_uuid</c></b>
+    /// — es la forma acordada de auditar y rastrear contra SAP. Construirlo con
+    /// <see cref="BuildRemarks"/>, no a mano.
     /// </summary>
     [JsonPropertyName("Remarks")]
     public string? Remarks { get; set; }
@@ -71,6 +71,35 @@ public sealed class IncomingPaymentPayload
     public List<IncomingPaymentInvoiceLine> PaymentInvoices { get; set; } = [];
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
+
+    /// <summary>Largo del campo <c>Comments</c> en SAP (<c>ORCT</c>).</summary>
+    private const int RemarksMaxLength = 254;
+
+    /// <summary>
+    /// Arma el <c>Remarks</c> de un pago. El <c>payment_uuid</c> es obligatorio y
+    /// va SIEMPRE de primero.
+    /// </summary>
+    /// <remarks>
+    /// El orden no es cosmético: el campo se recorta a
+    /// <see cref="RemarksMaxLength"/> caracteres, así que poner el uuid al final
+    /// permitiría que un contexto largo lo borrara justo cuando más se necesita
+    /// (auditar un pago que salió mal). De primero, es intocable.
+    /// </remarks>
+    /// <param name="paymentUuid">El <c>payment_uuid</c> que envía el middleware.</param>
+    /// <param name="context">Contexto opcional para un humano que lea el documento en SAP.</param>
+    public static string BuildRemarks(string paymentUuid, string? context = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(paymentUuid);
+
+        var remarks = $"payment_uuid={paymentUuid}";
+
+        if (!string.IsNullOrWhiteSpace(context))
+        {
+            remarks = $"{remarks} | {context}";
+        }
+
+        return remarks.Length <= RemarksMaxLength ? remarks : remarks[..RemarksMaxLength];
+    }
 }
 
 /// <summary>

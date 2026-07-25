@@ -80,7 +80,7 @@ public sealed class PaymentProbeWorker : BackgroundService
         var cardCode = _configuration["Probe:CardCode"];
         var docNumTexto = _configuration["Probe:DocNum"];
         var metodo = _configuration["Probe:Method"] ?? "EFECTIVO";
-        var referencia = _configuration["Probe:Reference"];
+        var paymentUuid = _configuration["Probe:PaymentUuid"];
         var confirmado = string.Equals(
             _configuration["Probe:Confirm"], "true", StringComparison.OrdinalIgnoreCase);
 
@@ -90,6 +90,16 @@ public sealed class PaymentProbeWorker : BackgroundService
             _logger.LogError(
                 "Faltan Probe:CardCode y Probe:DocNum. " +
                 "Ej: --Probe:CardCode=C100012 --Probe:DocNum=6918");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(paymentUuid))
+        {
+            Environment.ExitCode = 1;
+            _logger.LogError(
+                "Falta Probe:PaymentUuid. Todo pago debe llevar el payment_uuid explícito en " +
+                "Remarks: es la forma acordada de rastrearlo y auditarlo contra SAP, y sin él un " +
+                "pago creado no se puede relacionar con el que lo originó.");
             return;
         }
 
@@ -110,8 +120,48 @@ public sealed class PaymentProbeWorker : BackgroundService
             return;
         }
 
-        // Caso simple y exacto: se aplica el saldo completo, sin sobrante.
-        var monto = factura.OpenAmount!.Value;
+        // Por defecto se aplica el saldo completo y el pago vale lo mismo (caso
+        // exacto, sin sobrante). Probe:Applied y Probe:CashSum permiten separarlos
+        // para probar el caso del sobrante.
+        var aplicado = decimal.TryParse(
+            _configuration["Probe:Applied"],
+            System.Globalization.NumberStyles.Number,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var a)
+            ? a
+            : factura.OpenAmount!.Value;
+
+        var totalPagado = decimal.TryParse(
+            _configuration["Probe:CashSum"],
+            System.Globalization.NumberStyles.Number,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var c)
+            ? c
+            : aplicado;
+
+        if (aplicado <= 0 || totalPagado < aplicado)
+        {
+            Environment.ExitCode = 1;
+            _logger.LogError(
+                "Montos inconsistentes: aplicado={Aplicado}, total pagado={Total}. El total no " +
+                "puede ser menor que lo aplicado.",
+                aplicado,
+                totalPagado);
+            return;
+        }
+
+        if (aplicado > factura.OpenAmount!.Value)
+        {
+            Environment.ExitCode = 1;
+            _logger.LogError(
+                "No se aplica {Aplicado} a una factura cuyo saldo es {Saldo}: sobrepagar una " +
+                "factura específica no es lo que se quiere probar.",
+                aplicado,
+                factura.OpenAmount);
+            return;
+        }
+
+        var sobrante = totalPagado - aplicado;
         var hoy = _timeProvider.GetLocalNow().ToString("yyyy-MM-dd");
 
         // --- 2. Armar el payload ---------------------------------------------
@@ -121,17 +171,17 @@ public sealed class PaymentProbeWorker : BackgroundService
         {
             CardCode = cardCode,
             DocDate = hoy,
-            // Solo ASCII: el campo Remarks de SAP tiene largo limitado y no vale
-            // la pena arriesgar problemas de codificación por un guion bonito.
-            Remarks = referencia is null
-                ? $"dinas-wms-sap-sync - prueba {metodo} factura {docNum}"
-                : $"dinas-wms-sap-sync - {referencia}",
+            // Solo ASCII en el contexto: el campo tiene largo limitado y no vale
+            // arriesgar problemas de codificación por un guion bonito.
+            Remarks = IncomingPaymentPayload.BuildRemarks(
+                paymentUuid,
+                $"{metodo} fact {docNum}"),
             PaymentInvoices =
             [
                 new IncomingPaymentInvoiceLine
                 {
                     DocEntry = factura.DocEntry!.Value,
-                    SumApplied = monto,
+                    SumApplied = aplicado,
                 },
             ],
         };
@@ -140,11 +190,11 @@ public sealed class PaymentProbeWorker : BackgroundService
         {
             case "EFECTIVO":
                 payload.CashAccount = cuenta;
-                payload.CashSum = monto;
+                payload.CashSum = totalPagado;
                 break;
             case "TRANSFERENCIA":
                 payload.TransferAccount = cuenta;
-                payload.TransferSum = monto;
+                payload.TransferSum = totalPagado;
                 payload.TransferDate = hoy;
                 payload.TransferReference = _paymentsOptions.TransferReference;
                 break;
@@ -160,12 +210,16 @@ public sealed class PaymentProbeWorker : BackgroundService
         _logger.LogInformation(
             "=== Payload a enviar ===\n" +
             "  Factura: client_code={CardCode}, doc_num={DocNum} → DocEntry={DocEntry}\n" +
-            "  Saldo de la factura: {Saldo} (se aplica completo, sin sobrante)\n" +
+            "  Saldo de la factura: {Saldo}\n" +
+            "  Total pagado: {Total} | aplicado: {Aplicado} | SOBRANTE: {Sobrante}\n" +
             "  Método: {Metodo}, cuenta {Cuenta}\n{Json}",
             cardCode,
             docNum,
             factura.DocEntry,
-            monto,
+            factura.OpenAmount,
+            totalPagado,
+            aplicado,
+            sobrante,
             metodo,
             cuenta,
             json);
