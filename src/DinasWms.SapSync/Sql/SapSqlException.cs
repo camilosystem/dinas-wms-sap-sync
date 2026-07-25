@@ -50,27 +50,23 @@ public class SapSqlException : Exception
 /// </remarks>
 public sealed class AmbiguousInvoiceException : SapSqlException
 {
-    public AmbiguousInvoiceException(
-        string cardCode,
-        int docNum,
-        IReadOnlyList<(int DocEntry, int Series)> matches)
+    public AmbiguousInvoiceException(string cardCode, int docNum, IReadOnlyList<int> docEntries)
         : base(
-            $"Se encontraron {matches.Count} facturas en OINV con CardCode='{cardCode}' y " +
-            $"DocNum={docNum}: " +
-            string.Join(", ", matches.Select(m => $"DocEntry={m.DocEntry} (Series={m.Series})")) +
+            $"Se encontraron {docEntries.Count} facturas con client_code='{cardCode}' y " +
+            $"doc_num={docNum}: DocEntry " + string.Join(", ", docEntries) +
             ". DocNum es único por serie, no globalmente, así que la pareja " +
-            "CardCode+DocNum no alcanza para identificar el documento. No se elige " +
-            "ninguna: hay que decidir cómo desambiguar (probablemente incluir la serie " +
-            "en el contrato).")
+            "client_code+doc_num no alcanza para identificar el documento. No se elige " +
+            "ninguna: hay que decidir cómo desambiguar (probablemente exponer la serie " +
+            "en la vista e incluirla en el contrato del middleware).")
     {
         CardCode = cardCode;
         DocNum = docNum;
-        Matches = matches;
+        DocEntries = docEntries;
     }
 
     public string CardCode { get; }
 
     public int DocNum { get; }
 
-    public IReadOnlyList<(int DocEntry, int Series)> Matches { get; }
+    public IReadOnlyList<int> DocEntries { get; }
 }

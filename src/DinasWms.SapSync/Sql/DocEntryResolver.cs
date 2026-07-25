@@ -38,14 +38,31 @@ public interface IDocEntryResolver
 /// <inheritdoc cref="IDocEntryResolver"/>
 public sealed class DocEntryResolver : IDocEntryResolver
 {
-    // Se seleccionan todas las coincidencias (no TOP 1 ni ExecuteScalar) a
-    // propósito: hay que poder detectar el caso ambiguo en vez de tomar
-    // silenciosamente la primera fila. Series viaja solo para poder reportar la
-    // ambigüedad de forma útil.
-    private const string QueryFacturaPorDocNum = """
-        SELECT DocEntry, Series
-        FROM OINV
-        WHERE DocNum = @docNum AND CardCode = @cardCode
+    /// <summary>
+    /// Vista de lectura. NO se consulta <c>OINV</c> directamente: el principio del
+    /// proyecto es que las vistas <c>vw_WMS_*</c> son la única superficie de
+    /// lectura sobre SAP, y <c>wms_reader</c> tiene permisos solo sobre ellas.
+    /// </summary>
+    public const string ViewName = "dbo.vw_WMS_ClientDocuments";
+
+    // Notas sobre esta consulta:
+    //
+    //  · doc_type = 'INVOICE' es obligatorio, no cosmético: la vista unifica OINV
+    //    y ORIN con UNION ALL, y cada tabla tiene su propia secuencia de DocNum.
+    //    Sin el filtro, un doc_num que exista como factura Y como nota de crédito
+    //    del mismo cliente devolvería dos filas.
+    //
+    //  · No se usa TOP 1 ni ExecuteScalar: hay que poder detectar el caso ambiguo
+    //    en vez de tomar silenciosamente la primera fila.
+    //
+    //  · doc_total y open_amount viajan solo para el log — dan contexto al
+    //    diagnosticar. La lógica de montos de IncomingPayments es fase posterior.
+    private const string QueryFacturaPorDocNum = $"""
+        SELECT doc_entry, doc_total, open_amount, days_overdue
+        FROM {ViewName}
+        WHERE doc_type = 'INVOICE'
+          AND doc_num = @docNum
+          AND client_code = @cardCode
         """;
 
     private readonly ISapSqlConnectionFactory _connectionFactory;
@@ -79,7 +96,7 @@ public sealed class DocEntryResolver : IDocEntryResolver
             .OpenAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        var coincidencias = new List<(int DocEntry, int Series)>();
+        var coincidencias = new List<Coincidencia>();
 
         try
         {
@@ -99,39 +116,63 @@ public sealed class DocEntryResolver : IDocEntryResolver
 
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                coincidencias.Add((reader.GetInt32(0), reader.GetInt32(1)));
+                // Convert.* en vez de GetDecimal/GetInt32 directos: los tipos
+                // numéricos de SAP varían por columna y no se asumen.
+                coincidencias.Add(new Coincidencia(
+                    Convert.ToInt32(reader.GetValue(0)),
+                    Convert.ToDecimal(reader.GetValue(1)),
+                    Convert.ToDecimal(reader.GetValue(2)),
+                    reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3))));
             }
         }
         catch (SqlException ex)
         {
             throw new SapSqlException(
-                $"Falló la consulta de DocEntry en OINV (CardCode='{cardCode}', DocNum={docNum}) " +
-                $"contra {_connectionFactory.Target}. Error {ex.Number}: {ex.Message}",
+                $"Falló la consulta de DocEntry en {ViewName} (client_code='{cardCode}', " +
+                $"doc_num={docNum}) contra {_connectionFactory.Target}. " +
+                $"Error {ex.Number}: {ex.Message}",
                 ex);
         }
 
         if (coincidencias.Count == 0)
         {
+            // Ojo con interpretar esto: la vista solo expone documentos ABIERTOS
+            // (DocStatus = 'O'). "No encontrado" cubre tres casos distintos que
+            // desde acá no se distinguen: la factura no existe, ya está pagada
+            // por completo, o está cancelada.
             _logger.LogWarning(
-                "No existe factura en OINV con CardCode='{CardCode}' y DocNum={DocNum}.",
+                "No se encontró factura ABIERTA con client_code='{CardCode}' y doc_num={DocNum} " +
+                "en {Vista}. Puede que no exista, que ya esté pagada, o que esté cancelada — " +
+                "la vista solo expone documentos abiertos.",
                 cardCode,
-                docNum);
+                docNum,
+                ViewName);
             return null;
         }
 
         if (coincidencias.Count > 1)
         {
-            throw new AmbiguousInvoiceException(cardCode, docNum, coincidencias);
+            throw new AmbiguousInvoiceException(
+                cardCode, docNum, coincidencias.Select(c => c.DocEntry).ToArray());
         }
 
-        var (docEntry, series) = coincidencias[0];
+        var match = coincidencias[0];
         _logger.LogInformation(
-            "DocEntry resuelto: CardCode='{CardCode}', DocNum={DocNum} → DocEntry={DocEntry} (Series={Series}).",
+            "DocEntry resuelto: client_code='{CardCode}', doc_num={DocNum} → DocEntry={DocEntry} " +
+            "(doc_total={DocTotal}, open_amount={OpenAmount}, days_overdue={DaysOverdue}).",
             cardCode,
             docNum,
-            docEntry,
-            series);
+            match.DocEntry,
+            match.DocTotal,
+            match.OpenAmount,
+            match.DaysOverdue);
 
-        return docEntry;
+        return match.DocEntry;
     }
+
+    private sealed record Coincidencia(
+        int DocEntry,
+        decimal DocTotal,
+        decimal OpenAmount,
+        int? DaysOverdue);
 }
