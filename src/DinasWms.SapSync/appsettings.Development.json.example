@@ -1,0 +1,21 @@
+// Plantilla. Copiar a appsettings.Development.json (está en .gitignore) SOLO si
+// no se quiere usar user-secrets. La vía recomendada para UserName/Password es:
+//
+//   dotnet user-secrets set "ServiceLayer:UserName" "<usuario>"
+//   dotnet user-secrets set "ServiceLayer:Password" "<clave>"
+//
+// El usuario debe ser el NUEVO dedicado a esta integración, no el de Attain.
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Debug"
+    }
+  },
+  "ServiceLayer": {
+    "BaseUrl": "https://192.168.11.200:50000/b1s/v1/",
+    "CompanyDB": "SUPPORT_DINAS",
+    "UserName": "<pendiente>",
+    "Password": "<pendiente>",
+    "TrustSelfSignedCertificate": true
+  }
+}

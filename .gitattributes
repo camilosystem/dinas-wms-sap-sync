@@ -1,0 +1,10 @@
+# Normalizar finales de línea: LF en el repo, nativo en el working copy.
+* text=auto
+
+*.cs      text diff=csharp
+*.csproj  text
+*.sln     text eol=crlf
+*.json    text
+*.md      text
+*.yml     text
+*.gitignore text

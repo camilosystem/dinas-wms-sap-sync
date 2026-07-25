@@ -1,0 +1,32 @@
+## Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+artifacts/
+
+## Credenciales / configuración local — NUNCA versionar
+appsettings.Development.json
+appsettings.Local.json
+appsettings.*.local.json
+*.user-secrets.json
+secrets.json
+.env
+.env.*
+
+## Claude Code — configuración local de esta máquina
+.claude/settings.local.json
+
+## IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+## Varios
+*.log
