@@ -32,6 +32,10 @@ builder.Services
     .AddOptions<SqlOptions>()
     .Bind(builder.Configuration.GetSection(SqlOptions.SectionName));
 
+builder.Services
+    .AddOptions<PaymentsOptions>()
+    .Bind(builder.Configuration.GetSection(PaymentsOptions.SectionName));
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
 builder.Services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
@@ -60,6 +64,9 @@ switch (runMode.ToLowerInvariant())
         break;
     case "sldiscovery":
         builder.Services.AddHostedService<ServiceLayerDiscoveryWorker>();
+        break;
+    case "paymentprobe":
+        builder.Services.AddHostedService<PaymentProbeWorker>();
         break;
     default:
         builder.Services.AddHostedService<SyncSchedulerWorker>();
