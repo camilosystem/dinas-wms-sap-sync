@@ -13,10 +13,9 @@ namespace DinasWms.SapSync.Workers;
 /// una sola vez, reporta, y detiene el host.
 /// </summary>
 /// <remarks>
-/// Separa deliberadamente tres fallos que se confunden con facilidad:
-/// no poder conectar/autenticar, poder conectar pero no tener <c>SELECT</c>
-/// sobre <c>OINV</c>, y tener permiso pero que el documento no exista.
-/// Se invoca con <c>--RunMode=SqlProbe --Probe:CardCode=… --Probe:DocNum=…</c>.
+/// Verifica los tres desenlaces con documentos reales de la base, no solo el
+/// camino feliz: factura abierta, cerrada y anulada. Se invoca con
+/// <c>--RunMode=SqlProbe --Probe:CardCode=… --Probe:DocNum=…</c>.
 /// </remarks>
 public sealed class SqlProbeWorker : BackgroundService
 {
@@ -90,217 +89,312 @@ public sealed class SqlProbeWorker : BackgroundService
 
     private async Task CorrerProbeAsync(CancellationToken cancellationToken)
     {
-        var cardCode = _configuration["Probe:CardCode"];
-        var docNumTexto = _configuration["Probe:DocNum"];
-
         _logger.LogInformation(
             "=== Probe de SQL / resolución de DocEntry ===\n" +
             "  Servidor: {Server}\n" +
             "  Base:     {Database}\n" +
             "  Usuario:  {UserName}\n" +
-            "  Cifrado:  Encrypt={Encrypt}, TrustServerCertificate={Trust}",
+            "  Vista:    {Vista}",
             _sqlOptions.Server,
             _sqlOptions.Database,
             _sqlOptions.UserName,
-            _sqlOptions.Encrypt,
-            _sqlOptions.TrustServerCertificate);
+            DocEntryResolver.ViewName);
 
-        // --- Paso 1: conectar y autenticar -------------------------------
         await using var connection = await _connectionFactory
             .OpenAsync(cancellationToken)
             .ConfigureAwait(false);
 
         _logger.LogInformation("Paso 1 OK — conexión y autenticación establecidas.");
 
-        await using (var infoCmd = new SqlCommand(
-            "SELECT DB_NAME(), SUSER_SNAME(), USER_NAME(), @@VERSION", connection))
-        {
-            infoCmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
-            await using var reader = await infoCmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        await ReportarPermisosAsync(connection, cancellationToken).ConfigureAwait(false);
+        await ResolverCasoPedidoAsync(cancellationToken).ConfigureAwait(false);
+        await VerificarLosTresDesenlacesAsync(connection, cancellationToken).ConfigureAwait(false);
+        await ResponderPreguntasAbiertasAsync(connection, cancellationToken).ConfigureAwait(false);
+    }
 
-            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
-            {
-                var version = reader.GetString(3).ReplaceLineEndings(" ");
-                _logger.LogInformation(
-                    "  Base efectiva: {Base} | login: {Login} | usuario en la base: {Usuario}\n" +
-                    "  Versión: {Version}",
-                    reader.GetString(0),
-                    reader.GetString(1),
-                    reader.GetString(2),
-                    version.Length > 120 ? version[..120] + "…" : version);
-            }
-        }
-
-        // --- Paso 2: permisos sobre la vista (y confirmación de que las tablas
-        //             de SAP siguen cerradas, que es la red de seguridad) ------
-        // HAS_PERMS_BY_NAME responde sin necesidad de provocar el error: devuelve
-        // 1 (tiene permiso), 0 (no tiene), o NULL (el objeto no existe o no es
-        // visible para este login).
+    /// <summary>
+    /// Confirma acceso a la vista y que las tablas de SAP siguen cerradas — esa
+    /// restricción es la red de seguridad del proyecto, no un estorbo.
+    /// </summary>
+    private async Task ReportarPermisosAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
         foreach (var objeto in new[] { DocEntryResolver.ViewName, "dbo.OINV", "dbo.ORIN" })
         {
-            await using var permCmd = new SqlCommand(
+            await using var cmd = new SqlCommand(
                 "SELECT HAS_PERMS_BY_NAME(@objeto, 'OBJECT', 'SELECT')", connection);
-            permCmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
-            permCmd.Parameters.Add("@objeto", System.Data.SqlDbType.NVarChar, 256).Value = objeto;
+            cmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
+            cmd.Parameters.Add("@objeto", System.Data.SqlDbType.NVarChar, 256).Value = objeto;
 
-            var resultado = await permCmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            var resultado = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
 
             var estado = resultado is null || resultado == DBNull.Value
                 ? "NULL (no existe o no es visible para este login)"
-                : Convert.ToInt32(resultado) == 1
-                    ? "SÍ"
-                    : "NO";
+                : Convert.ToInt32(resultado) == 1 ? "SÍ" : "NO";
 
             _logger.LogInformation("Paso 2 — SELECT sobre {Objeto}: {Estado}", objeto, estado);
         }
+    }
 
-        // --- Paso 3: resolver el DocEntry pedido -------------------------
+    private async Task ResolverCasoPedidoAsync(CancellationToken cancellationToken)
+    {
+        var cardCode = _configuration["Probe:CardCode"];
+        var docNumTexto = _configuration["Probe:DocNum"];
+
         if (string.IsNullOrWhiteSpace(cardCode) || string.IsNullOrWhiteSpace(docNumTexto))
         {
             _logger.LogWarning(
-                "Paso 3 omitido: no se indicaron Probe:CardCode y Probe:DocNum. " +
+                "Paso 3 omitido: faltan Probe:CardCode y Probe:DocNum. " +
                 "Ejemplo: --Probe:CardCode=C100012 --Probe:DocNum=6152");
             return;
         }
 
         if (!int.TryParse(docNumTexto, out var docNum))
         {
-            _logger.LogError("Probe:DocNum='{Valor}' no es un entero.", docNumTexto);
             Environment.ExitCode = 1;
+            _logger.LogError("Probe:DocNum='{Valor}' no es un entero.", docNumTexto);
             return;
         }
 
-        var docEntry = await _resolver
-            .ResolveInvoiceDocEntryAsync(cardCode, docNum, cancellationToken)
+        var resultado = await _resolver
+            .LookupInvoiceAsync(cardCode, docNum, cancellationToken)
             .ConfigureAwait(false);
 
-        if (docEntry is null)
-        {
-            _logger.LogWarning(
-                "Paso 3 — la consulta funcionó, pero no existe factura con CardCode='{CardCode}' " +
-                "y DocNum={DocNum} en {Base}.",
-                cardCode,
-                docNum,
-                _sqlOptions.Database);
-            Environment.ExitCode = 1;
-            return;
-        }
-
         _logger.LogInformation(
-            "=== RESULTADO: CardCode={CardCode}, DocNum={DocNum} → DocEntry={DocEntry} ===",
-            cardCode,
-            docNum,
-            docEntry);
+            "=== RESULTADO: client_code={CardCode}, doc_num={DocNum} → {Desenlace}, " +
+            "DocEntry={DocEntry}, series={Series}, doc_status={Status}, anulada={Anulada}, " +
+            "aplicable={Aplicable} ===",
+            resultado.CardCode,
+            resultado.DocNum,
+            resultado.Outcome,
+            resultado.DocEntry,
+            resultado.Series,
+            resultado.DocStatus,
+            resultado.IsCanceled,
+            resultado.CanApplyPayment);
 
-        if (docEntry == docNum)
+        if (resultado.Outcome != InvoiceLookupOutcome.Resolved)
         {
-            _logger.LogWarning(
-                "Atención: para este documento DocEntry == DocNum ({Valor}), así que el caso NO " +
-                "distingue una resolución correcta de devolver el doc_num por error. Se busca un " +
-                "caso donde difieran para verificarlo de verdad.",
-                docNum);
+            Environment.ExitCode = 1;
         }
-
-        await VerificarConCasoDondeDifierenAsync(connection, cancellationToken).ConfigureAwait(false);
-        await MedirAmbiguedadAsync(connection, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Busca una factura donde <c>doc_entry != doc_num</c> y la resuelve. Es la
-    /// verificación que realmente demuestra que se devuelve el DocEntry.
+    /// Toma un documento real de cada estado y comprueba que el resolver lo
+    /// clasifique como corresponde. Un solo caso feliz no prueba la lógica.
     /// </summary>
-    private async Task VerificarConCasoDondeDifierenAsync(
+    private async Task VerificarLosTresDesenlacesAsync(
         SqlConnection connection,
         CancellationToken cancellationToken)
     {
-        string? cardCode = null;
-        int docNum = 0, docEntryEsperado = 0;
+        var casos = new (string Descripcion, string Filtro, InvoiceLookupOutcome Esperado)[]
+        {
+            ("abierta y vigente", "doc_status = 'O' AND is_canceled = 'N'", InvoiceLookupOutcome.Resolved),
+            ("cerrada",           "doc_status <> 'O' AND is_canceled = 'N'", InvoiceLookupOutcome.Closed),
+            ("anulada",           "is_canceled = 'Y'",                       InvoiceLookupOutcome.Canceled),
+        };
 
+        foreach (var (descripcion, filtro, esperado) in casos)
+        {
+            var muestra = await BuscarMuestraAsync(connection, filtro, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (muestra is null)
+            {
+                _logger.LogWarning(
+                    "Paso 4 — no hay ninguna factura {Descripcion} en esta base; ese desenlace " +
+                    "({Esperado}) queda sin verificar con datos reales.",
+                    descripcion,
+                    esperado);
+                continue;
+            }
+
+            var (cardCode, docNum, docEntryEsperado) = muestra.Value;
+
+            var resultado = await _resolver
+                .LookupInvoiceAsync(cardCode, docNum, cancellationToken)
+                .ConfigureAwait(false);
+
+            var ok = resultado.Outcome == esperado && resultado.DocEntry == docEntryEsperado;
+
+            if (ok)
+            {
+                _logger.LogInformation(
+                    "Paso 4 OK — factura {Descripcion}: client_code={CardCode}, doc_num={DocNum} → " +
+                    "{Desenlace}, DocEntry={DocEntry}.",
+                    descripcion,
+                    cardCode,
+                    docNum,
+                    resultado.Outcome,
+                    resultado.DocEntry);
+            }
+            else
+            {
+                Environment.ExitCode = 1;
+                _logger.LogError(
+                    "Paso 4 FALLÓ — factura {Descripcion}: client_code={CardCode}, doc_num={DocNum}. " +
+                    "Se esperaba {Esperado}/DocEntry={DocEntryEsperado} y se obtuvo " +
+                    "{Obtenido}/DocEntry={DocEntryObtenido}.",
+                    descripcion,
+                    cardCode,
+                    docNum,
+                    esperado,
+                    docEntryEsperado,
+                    resultado.Outcome,
+                    resultado.DocEntry);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Las tres preguntas que quedaron abiertas cuando solo se veían las facturas
+    /// abiertas. Con la vista sin filtro de estado ya se pueden responder.
+    /// </summary>
+    private async Task ResponderPreguntasAbiertasAsync(
+        SqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        // (1) ¿DocEntry y DocNum difieren alguna vez? Define si la resolución se
+        //     puede demostrar empíricamente o no.
+        var difieren = await EscalarIntAsync(
+            connection,
+            $"SELECT COUNT(*) FROM {DocEntryResolver.ViewName} WHERE doc_entry <> doc_num",
+            cancellationToken).ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Paso 5 — facturas donde doc_entry <> doc_num: {Cuantas}.", difieren);
+
+        if (difieren > 0)
+        {
+            var muestra = await BuscarMuestraAsync(
+                connection, "doc_entry <> doc_num", cancellationToken).ConfigureAwait(false);
+
+            if (muestra is not null)
+            {
+                var (cardCode, docNum, docEntryEsperado) = muestra.Value;
+                var resultado = await _resolver
+                    .LookupInvoiceAsync(cardCode, docNum, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (resultado.DocEntry == docEntryEsperado)
+                {
+                    _logger.LogInformation(
+                        "Paso 5 OK — caso donde difieren: client_code={CardCode}, doc_num={DocNum} → " +
+                        "DocEntry={DocEntry}. DEMOSTRADO que se devuelve el DocEntry, no el DocNum.",
+                        cardCode,
+                        docNum,
+                        resultado.DocEntry);
+                }
+                else
+                {
+                    Environment.ExitCode = 1;
+                    _logger.LogError(
+                        "Paso 5 FALLÓ — client_code={CardCode}, doc_num={DocNum}: se esperaba " +
+                        "DocEntry={Esperado} y se obtuvo {Obtenido}.",
+                        cardCode,
+                        docNum,
+                        docEntryEsperado,
+                        resultado.DocEntry);
+                }
+            }
+        }
+        else
+        {
+            _logger.LogWarning(
+                "Paso 5 — doc_entry y doc_num coinciden en TODAS las facturas de esta base, así que " +
+                "no se puede demostrar la distinción con datos de aquí. Habría que confirmarlo " +
+                "contra PRD_DINAS.");
+        }
+
+        // (2) ¿Cuántas series hay en OINV? Si es más de una, la ambigüedad de
+        //     DocNum deja de ser teórica.
         await using (var cmd = new SqlCommand(
             $"""
-            SELECT TOP 1 client_code, doc_num, doc_entry
+            SELECT series, COUNT(*) AS facturas, MIN(doc_num), MAX(doc_num)
             FROM {DocEntryResolver.ViewName}
-            WHERE doc_type = 'INVOICE' AND doc_entry <> doc_num
+            GROUP BY series ORDER BY series
             """, connection))
         {
             cmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
 
-            if (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            var series = 0;
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
             {
-                cardCode = reader.GetString(0);
-                docNum = Convert.ToInt32(reader.GetValue(1));
-                docEntryEsperado = Convert.ToInt32(reader.GetValue(2));
+                series++;
+                _logger.LogInformation(
+                    "Paso 6 — series={Series}: {Facturas} facturas, doc_num {Min}–{Max}.",
+                    reader.IsDBNull(0) ? "(null)" : reader.GetValue(0),
+                    reader.GetValue(1),
+                    reader.GetValue(2),
+                    reader.GetValue(3));
             }
+
+            _logger.LogInformation("Paso 6 — total de series en uso: {Total}.", series);
         }
 
-        if (cardCode is null)
-        {
-            _logger.LogWarning(
-                "Paso 4 — no hay ninguna factura abierta donde doc_entry difiera de doc_num en " +
-                "esta base, así que no se puede demostrar la distinción con datos reales de aquí.");
-            return;
-        }
-
-        var resuelto = await _resolver
-            .ResolveInvoiceDocEntryAsync(cardCode, docNum, cancellationToken)
-            .ConfigureAwait(false);
-
-        if (resuelto == docEntryEsperado)
-        {
-            _logger.LogInformation(
-                "Paso 4 OK — caso donde difieren: client_code={CardCode}, doc_num={DocNum} → " +
-                "DocEntry={DocEntry}. El resolver devuelve el DocEntry, no el DocNum.",
-                cardCode,
-                docNum,
-                resuelto);
-        }
-        else
-        {
-            Environment.ExitCode = 1;
-            _logger.LogError(
-                "Paso 4 FALLÓ — para client_code={CardCode}, doc_num={DocNum} se esperaba " +
-                "DocEntry={Esperado} y se obtuvo {Obtenido}.",
-                cardCode,
-                docNum,
-                docEntryEsperado,
-                resuelto);
-        }
-    }
-
-    /// <summary>
-    /// Mide si la ambigüedad de series es real en estos datos: cuántas parejas
-    /// (client_code, doc_num) aparecen más de una vez entre las facturas.
-    /// </summary>
-    private async Task MedirAmbiguedadAsync(SqlConnection connection, CancellationToken cancellationToken)
-    {
-        await using var cmd = new SqlCommand(
+        // (3) ¿Hay parejas (client_code, doc_num) repetidas al incluir TODAS las
+        //     facturas? Es el número que decide si hay que meter la serie en el
+        //     contrato del middleware.
+        var repetidas = await EscalarIntAsync(
+            connection,
             $"""
             SELECT COUNT(*) FROM (
                 SELECT client_code, doc_num
                 FROM {DocEntryResolver.ViewName}
-                WHERE doc_type = 'INVOICE'
                 GROUP BY client_code, doc_num
                 HAVING COUNT(*) > 1
             ) X
-            """, connection);
-        cmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
+            """,
+            cancellationToken).ConfigureAwait(false);
 
-        var colisiones = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
-
-        if (colisiones == 0)
+        if (repetidas == 0)
         {
             _logger.LogInformation(
-                "Paso 5 OK — no hay ninguna pareja (client_code, doc_num) repetida entre las " +
-                "facturas abiertas: hoy client_code+doc_num identifica el documento sin ambigüedad.");
+                "Paso 7 OK — 0 parejas (client_code, doc_num) repetidas sobre TODAS las facturas: " +
+                "la pareja identifica el documento sin ambigüedad en esta base.");
         }
         else
         {
             _logger.LogWarning(
-                "Paso 5 — hay {Colisiones} pareja(s) (client_code, doc_num) repetidas entre las " +
-                "facturas abiertas. La ambigüedad de series es REAL en estos datos y hay que " +
-                "resolverla en el contrato antes de aplicar pagos.",
-                colisiones);
+                "Paso 7 — hay {Repetidas} pareja(s) (client_code, doc_num) repetidas. La ambigüedad " +
+                "de series es REAL: hay que exponer la serie en el contrato antes de aplicar pagos.",
+                repetidas);
         }
+    }
+
+    private async Task<(string CardCode, int DocNum, int DocEntry)?> BuscarMuestraAsync(
+        SqlConnection connection,
+        string filtro,
+        CancellationToken cancellationToken)
+    {
+        // El filtro es texto fijo definido en este archivo, nunca entrada externa.
+        await using var cmd = new SqlCommand(
+            $"""
+            SELECT TOP 1 client_code, doc_num, doc_entry
+            FROM {DocEntryResolver.ViewName}
+            WHERE {filtro}
+            """, connection);
+        cmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        return (reader.GetString(0),
+                Convert.ToInt32(reader.GetValue(1)),
+                Convert.ToInt32(reader.GetValue(2)));
+    }
+
+    private async Task<int> EscalarIntAsync(
+        SqlConnection connection,
+        string sql,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.CommandTimeout = _sqlOptions.CommandTimeoutSeconds;
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
     }
 }
