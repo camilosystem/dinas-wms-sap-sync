@@ -16,6 +16,10 @@ secrets.json
 .env
 .env.*
 
+## Archivo centinela de "forzar ahora" — es un disparador en tiempo de ejecución,
+## no configuración del proyecto
+forzar-ahora.txt
+
 ## Claude Code — configuración local de esta máquina
 .claude/settings.local.json
 
