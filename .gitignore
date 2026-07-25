@@ -16,6 +16,9 @@ secrets.json
 .env
 .env.*
 
+## Volcados de exploración de Service Layer (metadata.xml pesa ~1.8 MB)
+discovery/
+
 ## Archivo centinela de "forzar ahora" — es un disparador en tiempo de ejecución,
 ## no configuración del proyecto
 forzar-ahora.txt

@@ -58,6 +58,9 @@ switch (runMode.ToLowerInvariant())
     case "sqlprobe":
         builder.Services.AddHostedService<SqlProbeWorker>();
         break;
+    case "sldiscovery":
+        builder.Services.AddHostedService<ServiceLayerDiscoveryWorker>();
+        break;
     default:
         builder.Services.AddHostedService<SyncSchedulerWorker>();
         break;
