@@ -1,5 +1,6 @@
 using System.Reflection;
 using DinasWms.SapSync.Configuration;
+using DinasWms.SapSync.Middleware;
 using DinasWms.SapSync.ServiceLayer;
 using DinasWms.SapSync.Sql;
 using DinasWms.SapSync.Sync;
@@ -36,10 +37,15 @@ builder.Services
     .AddOptions<PaymentsOptions>()
     .Bind(builder.Configuration.GetSection(PaymentsOptions.SectionName));
 
+builder.Services
+    .AddOptions<MiddlewareOptions>()
+    .Bind(builder.Configuration.GetSection(MiddlewareOptions.SectionName));
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
 builder.Services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
 builder.Services.AddSingleton<IDocEntryResolver, DocEntryResolver>();
+builder.Services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
 builder.Services.AddSingleton<ForceRequestWatcher>();
 builder.Services.AddSingleton<ISyncCycle, SyncCycle>();
 
@@ -74,6 +80,9 @@ switch (runMode.ToLowerInvariant())
         break;
     case "paymentcancel":
         builder.Services.AddHostedService<PaymentCancelWorker>();
+        break;
+    case "middlewareprobe":
+        builder.Services.AddHostedService<MiddlewareProbeWorker>();
         break;
     default:
         // Un RunMode desconocido NO cae al scheduler. Antes sí, y eso hizo que un
