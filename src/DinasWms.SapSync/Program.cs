@@ -53,9 +53,13 @@ builder.Services.AddSingleton<ISyncCycle, SyncCycle>();
 //   dotnet run -- --RunMode=SmokeTest
 //   dotnet run -- --RunMode=SqlProbe --Probe:CardCode=C100012 --Probe:DocNum=6152
 var runMode = builder.Configuration["RunMode"] ?? "Scheduler";
+var modoDesconocido = false;
 
 switch (runMode.ToLowerInvariant())
 {
+    case "scheduler":
+        builder.Services.AddHostedService<SyncSchedulerWorker>();
+        break;
     case "smoketest":
         builder.Services.AddHostedService<SessionSmokeTestWorker>();
         break;
@@ -68,8 +72,16 @@ switch (runMode.ToLowerInvariant())
     case "paymentprobe":
         builder.Services.AddHostedService<PaymentProbeWorker>();
         break;
+    case "paymentcancel":
+        builder.Services.AddHostedService<PaymentCancelWorker>();
+        break;
     default:
-        builder.Services.AddHostedService<SyncSchedulerWorker>();
+        // Un RunMode desconocido NO cae al scheduler. Antes sí, y eso hizo que un
+        // binario viejo (compilado antes de que existiera un modo nuevo) arrancara
+        // el scheduler en silencio cuando se le pidió un diagnóstico: el proceso
+        // se quedó corriendo ciclos contra SAP sin que nadie lo pidiera. Fallar
+        // ruidosamente es lo correcto.
+        modoDesconocido = true;
         break;
 }
 
@@ -84,6 +96,17 @@ var host = builder.Build();
 var logger = host.Services
     .GetRequiredService<ILoggerFactory>()
     .CreateLogger("DinasWms.SapSync");
+
+if (modoDesconocido)
+{
+    logger.LogCritical(
+        "RunMode desconocido: '{Modo}'. Modos válidos: Scheduler, SmokeTest, SqlProbe, " +
+        "SlDiscovery, PaymentProbe, PaymentCancel. No se arranca nada — en particular, NO se " +
+        "cae al scheduler, para que un binario desactualizado no termine corriendo ciclos " +
+        "contra SAP cuando se le pidió otra cosa.",
+        runMode);
+    return 1;
+}
 
 // Validación temprana: es preferible no arrancar que descubrir a mitad de un
 // ciclo que faltaba una credencial o que el horario está mal escrito. Además

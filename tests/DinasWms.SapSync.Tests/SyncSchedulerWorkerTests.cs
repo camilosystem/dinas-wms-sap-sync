@@ -65,13 +65,26 @@ public class SyncSchedulerWorkerTests
             TimeProvider.System,
             NullLogger<SyncSchedulerWorker>.Instance);
 
-        await worker.StartAsync(CancellationToken.None);
+        // La excepción puede salir por DOS caminos, y cuál de los dos es una
+        // carrera con el thread pool. BackgroundService.StartAsync hace:
+        //
+        //     _executeTask = ExecuteAsync(token);
+        //     if (_executeTask.IsCompleted) return _executeTask;   // <- propaga
+        //     return Task.CompletedTask;
+        //
+        // Si la continuación de ExecuteAsync corre antes de ese IsCompleted, la
+        // excepción sale por StartAsync; si no, queda en ExecuteTask. Esperar solo
+        // uno de los dos hace la prueba inestable (falló ~1 de cada 3 corridas).
+        // Cubrir ambos la vuelve determinista sin tapar nada.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await worker.StartAsync(CancellationToken.None);
 
-        // La excepción queda en ExecuteTask, no la propaga StopAsync (que usa
-        // Task.WhenAny internamente). Con ExecuteTask fallado, el host detiene el
-        // proceso por su BackgroundServiceExceptionBehavior por defecto.
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
-            async () => await worker.ExecuteTask!);
+            if (worker.ExecuteTask is not null)
+            {
+                await worker.ExecuteTask;
+            }
+        });
 
         Assert.Contains("HH:mm", ex.Message);
         Assert.Equal(0, ciclo.Ejecuciones);
