@@ -45,6 +45,19 @@ public sealed class IncomingPaymentPayload
     [JsonPropertyName("CashSum")]
     public decimal? CashSum { get; set; }
 
+    // --- CHEQUE -----------------------------------------------------------
+
+    /// <summary>Cuenta de control de cheques, en la cabecera.</summary>
+    [JsonPropertyName("CheckAccount")]
+    public string? CheckAccount { get; set; }
+
+    /// <summary>
+    /// Cheques recibidos. Para CHEQUE hay que enviar la cuenta en la cabecera
+    /// <b>y</b> al menos una línea acá — no basta con una de las dos.
+    /// </summary>
+    [JsonPropertyName("PaymentChecks")]
+    public List<IncomingPaymentCheckLine>? PaymentChecks { get; set; }
+
     // --- TRANSFERENCIA ----------------------------------------------------
     [JsonPropertyName("TransferAccount")]
     public string? TransferAccount { get; set; }
@@ -121,4 +134,43 @@ public sealed class IncomingPaymentInvoiceLine
     /// <summary>Factura de venta. Enum <c>BoRcptInvTypes</c>.</summary>
     [JsonPropertyName("InvoiceType")]
     public string InvoiceType { get; set; } = "it_Invoice";
+}
+
+/// <summary>
+/// Un cheque recibido. Complex type <c>PaymentCheck</c>.
+/// </summary>
+/// <remarks>
+/// Los campos y sus valores salen de un cheque REAL de SUPPORT_DINAS
+/// (pago DocEntry 3, cheque 58091 del banco 008), no de la documentación.
+/// </remarks>
+public sealed class IncomingPaymentCheckLine
+{
+    /// <summary>Número del cheque, tal como viene impreso.</summary>
+    [JsonPropertyName("CheckNumber")]
+    public int CheckNumber { get; set; }
+
+    /// <summary>
+    /// Código del banco girador, de la entidad <c>Banks</c> de SAP
+    /// (ej. "008" = JPMorgan Chase Bank). No es texto libre: tiene que existir.
+    /// </summary>
+    [JsonPropertyName("BankCode")]
+    public string BankCode { get; set; } = "";
+
+    /// <summary>Fecha de cobro del cheque, formato <c>yyyy-MM-dd</c>.</summary>
+    [JsonPropertyName("DueDate")]
+    public string? DueDate { get; set; }
+
+    /// <summary>Monto del cheque.</summary>
+    [JsonPropertyName("CheckSum")]
+    public decimal CheckSum { get; set; }
+
+    [JsonPropertyName("Currency")]
+    public string Currency { get; set; } = "$";
+
+    [JsonPropertyName("CountryCode")]
+    public string CountryCode { get; set; } = "US";
+
+    /// <summary>Endosable. Los cheques reales de esta base usan <c>tYES</c>.</summary>
+    [JsonPropertyName("Trnsfrable")]
+    public string Trnsfrable { get; set; } = "tYES";
 }

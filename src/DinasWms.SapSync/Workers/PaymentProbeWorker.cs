@@ -165,7 +165,13 @@ public sealed class PaymentProbeWorker : BackgroundService
         var hoy = _timeProvider.GetLocalNow().ToString("yyyy-MM-dd");
 
         // --- 2. Armar el payload ---------------------------------------------
-        var cuenta = _paymentsOptions.RequireAccountFor(metodo);
+        // Probe:Account simula lo que el middleware ya resuelve de punta a punta
+        // (payment_channel / transfer_bank_account → cuenta contable). Si no
+        // viene, se cae a la configuración local.
+        var cuentaExplicita = _configuration["Probe:Account"];
+        var cuenta = string.IsNullOrWhiteSpace(cuentaExplicita)
+            ? _paymentsOptions.RequireAccountFor(metodo)
+            : cuentaExplicita;
 
         var payload = new IncomingPaymentPayload
         {
@@ -198,11 +204,46 @@ public sealed class PaymentProbeWorker : BackgroundService
                 payload.TransferDate = hoy;
                 payload.TransferReference = _paymentsOptions.TransferReference;
                 break;
+            case "CHEQUE":
+                // Un cheque necesita datos que solo puede dar el origen: número y
+                // banco. Antes se lanzaba acá porque el contrato no los traía; hoy
+                // sí, pero si faltan se sigue fallando en vez de inventarlos.
+                var numeroCheque = _configuration["Probe:CheckNumber"];
+                var bankCode = _configuration["Probe:BankCode"];
+
+                if (!int.TryParse(numeroCheque, out var checkNumber) || checkNumber <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "CHEQUE requiere Probe:CheckNumber (entero positivo). Sin el número, el " +
+                        "cheque no se puede identificar ni conciliar después.");
+                }
+
+                if (string.IsNullOrWhiteSpace(bankCode))
+                {
+                    throw new InvalidOperationException(
+                        "CHEQUE requiere Probe:BankCode, y debe existir en la entidad Banks de SAP " +
+                        "(ej. '008' = JPMorgan Chase Bank).");
+                }
+
+                payload.CheckAccount = cuenta;
+                payload.PaymentChecks =
+                [
+                    new IncomingPaymentCheckLine
+                    {
+                        CheckNumber = checkNumber,
+                        BankCode = bankCode,
+                        // Fecha de cobro: por defecto hoy. El contrato ampliado
+                        // podrá traer cheques posfechados.
+                        DueDate = _configuration["Probe:CheckDueDate"] ?? hoy,
+                        CheckSum = totalPagado,
+                    },
+                ];
+                break;
+
             default:
-                // CHEQUE no es implementable hasta que el contrato traiga número
-                // de cheque y banco. No se improvisa un cheque incompleto.
                 throw new InvalidOperationException(
-                    $"El método '{metodo}' no está implementado todavía en este arnés.");
+                    $"El método '{metodo}' no está implementado en este arnés. " +
+                    "Esperados: EFECTIVO, TRANSFERENCIA, CHEQUE.");
         }
 
         var json = payload.ToJson();
