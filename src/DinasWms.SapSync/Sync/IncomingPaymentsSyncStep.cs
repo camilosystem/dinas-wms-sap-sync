@@ -514,11 +514,17 @@ public sealed class IncomingPaymentsSyncStep : IDocumentSyncStep
 
         if (status == HttpStatusCode.OK)
         {
+            // El cuerpo trae la tarea ya actualizada. Se registra completo a
+            // propósito: es la única evidencia desde este lado de que el
+            // middleware aplicó el cambio, y no hay endpoint de lectura para
+            // consultar el AccountPayment después.
             _logger.LogInformation(
-                "Tarea {TaskId}: resultado reportado como {Estado}{Ref}.",
+                "Tarea {TaskId}: resultado reportado como {Estado}{Ref}. " +
+                "Respuesta del middleware:\n{Body}",
                 taskId,
                 reporte.Status,
-                reporte.SapReference is null ? "" : $" (sap_reference {reporte.SapReference})");
+                reporte.SapReference is null ? "" : $" (sap_reference {reporte.SapReference})",
+                string.IsNullOrWhiteSpace(body) ? "(cuerpo vacío)" : body);
             return;
         }
 
