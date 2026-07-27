@@ -46,27 +46,48 @@ public sealed class MiddlewareProbeWorker : BackgroundService
 
         try
         {
-            var ruta = _configuration["Probe:Path"] ?? "admin/sap-sync/account-payments/pending";
+            // Varias rutas en un solo login, para no gastar un token por consulta.
+            var rutas = _configuration.GetSection("Probe:Paths")
+                .GetChildren()
+                .Select(c => c.Value)
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v!)
+                .ToList();
 
-            _logger.LogInformation(
-                "=== Sondeo del middleware ===\n  Base: {Base}\n  Ruta: {Ruta}\n  Credencial: {Cred}",
-                _options.BaseUrl,
-                ruta,
-                string.IsNullOrWhiteSpace(_options.ApiKey)
-                    ? "(ninguna configurada)"
-                    : $"header {_options.ApiKeyHeader}, presente");
-
-            var (status, body) = await _client.GetAsync(ruta, stoppingToken).ConfigureAwait(false);
-
-            _logger.LogInformation(
-                "=== RESPUESTA LITERAL ({Codigo} {Status}) ===\n{Body}",
-                (int)status,
-                status,
-                string.IsNullOrWhiteSpace(body) ? "(cuerpo vacío)" : body);
-
-            if (status != System.Net.HttpStatusCode.OK)
+            if (rutas.Count == 0)
             {
-                Environment.ExitCode = 1;
+                rutas.Add(_configuration["Probe:Path"] ?? "admin/sap-sync/account-payments/pending");
+            }
+
+            _logger.LogInformation(
+                "=== Sondeo del middleware ===\n  Base: {Base}\n  Usuario: {Usuario}\n  Rutas: {Cuantas}",
+                _options.BaseUrl,
+                _options.UserName,
+                rutas.Count);
+
+            await _client.LoginAsync(stoppingToken).ConfigureAwait(false);
+
+            foreach (var ruta in rutas)
+            {
+                _logger.LogInformation("GET {Ruta} …", ruta);
+
+                var (status, body) = await _client.GetAsync(ruta, stoppingToken).ConfigureAwait(false);
+
+                var cuerpo = string.IsNullOrWhiteSpace(body)
+                    ? "(cuerpo vacío)"
+                    : body.Length > 12000 ? body[..12000] + "\n… (truncado)" : body;
+
+                _logger.LogInformation(
+                    "  → RESPUESTA LITERAL ({Codigo} {Status}), {Bytes:N0} bytes:\n{Body}",
+                    (int)status,
+                    status,
+                    body.Length,
+                    cuerpo);
+
+                if (status != System.Net.HttpStatusCode.OK)
+                {
+                    Environment.ExitCode = 1;
+                }
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

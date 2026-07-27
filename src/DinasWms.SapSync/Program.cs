@@ -49,10 +49,9 @@ builder.Services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
 builder.Services.AddSingleton<ForceRequestWatcher>();
 builder.Services.AddSingleton<ISyncCycle, SyncCycle>();
 
-// Los tipos de documento se registran acá cuando se construyan, uno a la vez
+// Tipos de documento a integrar, uno a la vez
 // (roadmap: IncomingPayments → CreditNotes → facturas → voids → retornos).
-// Sin ninguno registrado, un ciclo hace Login/Logout y sirve de latido.
-//   builder.Services.AddSingleton<IDocumentSyncStep, IncomingPaymentsSyncStep>();
+builder.Services.AddSingleton<IDocumentSyncStep, IncomingPaymentsSyncStep>();
 
 // Modos de ejecución. El default es el scheduler; los otros dos son
 // diagnósticos de una sola pasada:
@@ -137,6 +136,11 @@ try
     {
         host.Services.GetRequiredService<IOptions<ServiceLayerOptions>>().Value.Validate();
         host.Services.GetRequiredService<IOptions<SchedulerOptions>>().Value.Validate();
+
+        // Ya hay un paso de documentos registrado que necesita SQL y middleware,
+        // así que ambos entran en la validación temprana del modo Scheduler.
+        host.Services.GetRequiredService<IOptions<SqlOptions>>().Value.Validate();
+        host.Services.GetRequiredService<IOptions<MiddlewareOptions>>().Value.Validate();
     }
 }
 catch (Exception ex)

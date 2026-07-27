@@ -18,17 +18,14 @@ public sealed class MiddlewareOptions
     /// <summary>URL base del middleware, con slash final.</summary>
     public string BaseUrl { get; set; } = "";
 
-    /// <summary>
-    /// Credencial para los endpoints <c>/admin/sap-sync/*</c>. Va en
-    /// user-secrets, nunca en un archivo versionado.
-    /// </summary>
-    public string? ApiKey { get; set; }
+    /// <summary>Usuario para <c>POST auth/login</c>. Va en user-secrets.</summary>
+    public string UserName { get; set; } = "";
 
-    /// <summary>
-    /// Nombre del header por el que viaja la credencial. Se deja configurable
-    /// porque el esquema exacto lo define el middleware, no este repo.
-    /// </summary>
-    public string ApiKeyHeader { get; set; } = "X-Api-Key";
+    /// <summary>Contraseña para <c>POST auth/login</c>. Va en user-secrets.</summary>
+    public string Password { get; set; } = "";
+
+    /// <summary>Ruta relativa del login que devuelve el JWT.</summary>
+    public string LoginPath { get; set; } = "auth/login";
 
     public int TimeoutSeconds { get; set; } = 30;
 
@@ -57,6 +54,19 @@ public sealed class MiddlewareOptions
         {
             throw new InvalidOperationException(
                 $"{SectionName}:{nameof(BaseUrl)} no es una URL absoluta válida: '{BaseUrl}'.");
+        }
+
+        if (string.IsNullOrWhiteSpace(UserName) || string.IsNullOrWhiteSpace(Password))
+        {
+            throw new InvalidOperationException(
+                $"Faltan credenciales del middleware ({SectionName}:{nameof(UserName)} / " +
+                $"{nameof(Password)}). Se cargan con: " +
+                $"dotnet user-secrets set \"{SectionName}:{nameof(Password)}\" \"...\"");
+        }
+
+        if (string.IsNullOrWhiteSpace(LoginPath))
+        {
+            throw new InvalidOperationException($"Falta {SectionName}:{nameof(LoginPath)}.");
         }
 
         if (TimeoutSeconds <= 0)
