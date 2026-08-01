@@ -80,6 +80,12 @@ switch (runMode.ToLowerInvariant())
     case "paymentcancel":
         builder.Services.AddHostedService<PaymentCancelWorker>();
         break;
+    case "draftinvoiceprobe":
+        builder.Services.AddHostedService<DraftInvoiceProbeWorker>();
+        break;
+    case "invoiceprobe":
+        builder.Services.AddHostedService<InvoiceProbeWorker>();
+        break;
     case "middlewareprobe":
         builder.Services.AddHostedService<MiddlewareProbeWorker>();
         break;
@@ -109,7 +115,8 @@ if (modoDesconocido)
 {
     logger.LogCritical(
         "RunMode desconocido: '{Modo}'. Modos válidos: Scheduler, SmokeTest, SqlProbe, " +
-        "SlDiscovery, PaymentProbe, PaymentCancel. No se arranca nada — en particular, NO se " +
+        "SlDiscovery, PaymentProbe, PaymentCancel, MiddlewareProbe, DraftInvoiceProbe, " +
+        "InvoiceProbe. No se arranca nada — en particular, NO se " +
         "cae al scheduler, para que un binario desactualizado no termine corriendo ciclos " +
         "contra SAP cuando se le pidió otra cosa.",
         runMode);

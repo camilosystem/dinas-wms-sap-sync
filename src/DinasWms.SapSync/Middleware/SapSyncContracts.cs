@@ -132,6 +132,151 @@ public sealed class InvoiceApplication
     public decimal? Amount { get; set; }
 }
 
+/// <summary>Respuesta de <c>GET /admin/sap-sync/order-invoices/pending</c>.</summary>
+/// <remarks>
+/// El sobre de la tarea es idéntico al de los pagos; lo único que cambia es el
+/// snapshot que cuelga (<c>order_invoice</c> en vez de <c>account_payment</c>).
+/// Confirmado contra la respuesta real del middleware (tarea 15, 31-jul-2026).
+/// </remarks>
+public sealed class SapOrderInvoiceSyncTasksPage
+{
+    [JsonPropertyName("tasks")]
+    public List<SapOrderInvoiceSyncTask>? Tasks { get; set; }
+}
+
+/// <summary>Una tarea de la cola de facturas de órdenes ya picadas.</summary>
+public sealed class SapOrderInvoiceSyncTask
+{
+    [JsonPropertyName("task_id")]
+    public int TaskId { get; set; }
+
+    [JsonPropertyName("document_uuid")]
+    public string? DocumentUuid { get; set; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("forced")]
+    public bool Forced { get; set; }
+
+    [JsonPropertyName("attempts")]
+    public int Attempts { get; set; }
+
+    [JsonPropertyName("error_detail")]
+    public string? ErrorDetail { get; set; }
+
+    [JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; set; }
+
+    [JsonPropertyName("last_attempt_at")]
+    public DateTimeOffset? LastAttemptAt { get; set; }
+
+    [JsonPropertyName("order_invoice")]
+    public SapOrderInvoiceSnapshot? OrderInvoice { get; set; }
+}
+
+/// <summary>
+/// La factura a crear, tal como quedó al completarse el picking.
+/// </summary>
+/// <remarks>
+/// Es una factura STANDALONE: no hay Orden de Venta en SAP que le sirva de base.
+/// Las cantidades ya vienen resueltas desde el <c>PalletAssignment</c> (lo
+/// realmente picado, no lo pedido) y el precio ya viene resuelto y CONGELADO
+/// desde la <c>OrderLine</c>. El WMS no los revalida y SAP no los recalcula.
+///
+/// Lo que este contrato NO trae, y hay que resolver por fuera:
+///   · el ALMACÉN del que sale la mercancía (hoy: configuración, 01);
+///   · la UNIDAD de <c>quantity</c> (SAP factura en unidad de venta).
+/// </remarks>
+public sealed class SapOrderInvoiceSnapshot
+{
+    /// <summary>
+    /// Identidad de la orden. En la cola real llega con el mismo valor que
+    /// <c>document_uuid</c>: la factura no tiene uuid propio, se rastrea por la
+    /// orden que la originó. Es lo que va en <c>Comments</c>.
+    /// </summary>
+    [JsonPropertyName("order_uuid")]
+    public string? OrderUuid { get; set; }
+
+    [JsonPropertyName("client_code")]
+    public string? ClientCode { get; set; }
+
+    /// <summary>Camión del despacho. No le sirve a SAP; sí como contexto humano.</summary>
+    [JsonPropertyName("truck_id")]
+    public string? TruckId { get; set; }
+
+    /// <summary>Fecha de la factura, <c>yyyy-MM-dd</c>.</summary>
+    [JsonPropertyName("invoice_date")]
+    public string? InvoiceDate { get; set; }
+
+    [JsonPropertyName("lines")]
+    public List<SapOrderInvoiceLine>? Lines { get; set; }
+
+    /// <summary>
+    /// Total que el WMS espera de esta factura. Es la única referencia
+    /// autoritativa contra la cual contrastar el <c>DocTotal</c> que devuelve
+    /// SAP: si difieren, el documento no dice lo que el WMS autorizó, y eso se
+    /// reporta — no se corrige por cuenta propia.
+    /// </summary>
+    [JsonPropertyName("expected_doc_total")]
+    public decimal? ExpectedDocTotal { get; set; }
+}
+
+/// <summary>Una línea de la factura, ya picada y con el precio congelado.</summary>
+public sealed class SapOrderInvoiceLine
+{
+    [JsonPropertyName("item_code")]
+    public string? ItemCode { get; set; }
+
+    /// <summary>Lo realmente picado (<c>PalletAssignment</c>), no lo pedido.</summary>
+    [JsonPropertyName("quantity")]
+    public decimal? Quantity { get; set; }
+
+    /// <summary>Precio ANTES de descuento, congelado por el WMS.</summary>
+    [JsonPropertyName("unit_price")]
+    public decimal? UnitPrice { get; set; }
+
+    /// <summary>Descuento de la línea. 100 es válido: es una promoción.</summary>
+    [JsonPropertyName("discount_pct")]
+    public decimal? DiscountPct { get; set; }
+
+    /// <summary>Total de la línea según el WMS, ya con el descuento aplicado.</summary>
+    [JsonPropertyName("expected_line_total")]
+    public decimal? ExpectedLineTotal { get; set; }
+
+    /// <summary>
+    /// De qué ubicaciones sale la mercancía de esta línea. El reparto lo hace el
+    /// middleware; acá se usa TAL CUAL, sin recalcular.
+    /// </summary>
+    [JsonPropertyName("bin_allocations")]
+    public List<SapOrderInvoiceBinAllocation>? BinAllocations { get; set; }
+}
+
+/// <summary>Una asignación de bin de una línea.</summary>
+/// <remarks>
+/// Viene con el <c>bin_code</c> (el que lee un humano), pero SAP exige el
+/// <c>AbsEntry</c> del bin. Ese mapeo se resuelve localmente contra la entidad
+/// <c>BinLocations</c>, por la misma razón y con el mismo criterio que el
+/// <c>DocEntry</c> de las facturas: las claves internas de SAP no viajan por el
+/// contrato.
+/// </remarks>
+public sealed class SapOrderInvoiceBinAllocation
+{
+    [JsonPropertyName("bin_code")]
+    public string? BinCode { get; set; }
+
+    [JsonPropertyName("quantity")]
+    public decimal? Quantity { get; set; }
+
+    /// <summary>
+    /// <c>true</c> = el WMS NO sabe de qué bin salió realmente la mercancía y
+    /// repartió por saldo disponible. El documento de SAP va a afirmar una salida
+    /// por ubicación que puede no ser la física. Se registra siempre.
+    /// </summary>
+    [JsonPropertyName("approximate")]
+    public bool Approximate { get; set; }
+}
+
 /// <summary>Cuerpo de <c>POST .../{taskId}/result</c>.</summary>
 public sealed class SapSyncResultReport
 {
