@@ -350,6 +350,11 @@ public sealed class DraftInvoiceProbeWorker : BackgroundService
                              $"| DocType = {Texto(raiz, "DocType")} | Series = {Numero(raiz, "Series")} " +
                              $"| DocCurrency = {Texto(raiz, "DocCurrency")}");
 
+            // UserSign es el usuario de SAP al que queda atribuido el documento
+            // (OUSR.InternalKey). Es lo que prueba con qué cuenta escribe de
+            // verdad el sincronizador, más allá de con cuál dice que hizo login.
+            texto.AppendLine($"  UserSign = {Numero(raiz, "UserSign")}  ← usuario creador en SAP");
+
             if (raiz.TryGetProperty("DocumentLines", out var lineas) &&
                 lineas.ValueKind == JsonValueKind.Array)
             {

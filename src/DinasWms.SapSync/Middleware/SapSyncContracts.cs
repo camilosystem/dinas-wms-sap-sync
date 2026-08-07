@@ -277,6 +277,164 @@ public sealed class SapOrderInvoiceBinAllocation
     public bool Approximate { get; set; }
 }
 
+/// <summary>Respuesta de <c>GET /admin/sap-sync/credit-requests/pending</c>.</summary>
+/// <remarks>
+/// Escrito contra el OpenAPI real del middleware y contra respuestas reales de
+/// la cola, no contra el documento de contrato.
+/// </remarks>
+public sealed class SapCreditRequestSyncTasksPage
+{
+    [JsonPropertyName("tasks")]
+    public List<SapCreditRequestSyncTask>? Tasks { get; set; }
+}
+
+/// <summary>Una tarea de la cola de notas de crédito.</summary>
+/// <remarks>
+/// A diferencia de pagos y facturas, <b>una solicitud puede producir DOS
+/// tareas</b> — una por documento a crear (<see cref="DocKind"/>) — que comparten
+/// el mismo <c>document_uuid</c>. Cada una se integra y se reintenta por
+/// separado, y el anti-duplicado tiene que distinguirlas: buscar solo por
+/// <c>request_uuid</c> encontraría la nota hermana y daría por integrada una que
+/// nunca se creó.
+/// </remarks>
+public sealed class SapCreditRequestSyncTask
+{
+    [JsonPropertyName("task_id")]
+    public int TaskId { get; set; }
+
+    [JsonPropertyName("document_uuid")]
+    public string? DocumentUuid { get; set; }
+
+    /// <summary><c>ITEMS</c> o <c>SERVICE</c>: qué documento crear.</summary>
+    [JsonPropertyName("doc_kind")]
+    public string? DocKind { get; set; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }
+
+    [JsonPropertyName("forced")]
+    public bool Forced { get; set; }
+
+    [JsonPropertyName("attempts")]
+    public int Attempts { get; set; }
+
+    /// <summary>
+    /// Referencia del documento en SAP que ya quedó guardada del lado del
+    /// middleware. Permite comprobar que el número reportado se persistió, en vez
+    /// de solo saber que la llamada no dio error.
+    /// </summary>
+    [JsonPropertyName("sap_reference")]
+    public string? SapReference { get; set; }
+
+    /// <summary>
+    /// El error del último intento fallido. Ya NO se limpia al reintentar, así
+    /// que una tarea PENDIENTE con <c>attempts &gt; 0</c> dice qué pasó antes.
+    /// </summary>
+    [JsonPropertyName("error_detail")]
+    public string? ErrorDetail { get; set; }
+
+    [JsonPropertyName("created_at")]
+    public DateTimeOffset CreatedAt { get; set; }
+
+    [JsonPropertyName("last_attempt_at")]
+    public DateTimeOffset? LastAttemptAt { get; set; }
+
+    [JsonPropertyName("credit_request")]
+    public SapCreditRequestSnapshot? CreditRequest { get; set; }
+}
+
+/// <summary>La solicitud de crédito tal como la aprobó el aprobador.</summary>
+public sealed class SapCreditRequestSnapshot
+{
+    [JsonPropertyName("request_uuid")]
+    public string? RequestUuid { get; set; }
+
+    [JsonPropertyName("client_code")]
+    public string? ClientCode { get; set; }
+
+    /// <summary><c>DOESNT_WANT_IT</c>, <c>MISTAKE</c>, <c>DAMAGED</c> o <c>SHORT</c>.</summary>
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+
+    /// <summary>
+    /// <c>DocNum</c> de la factura de referencia, o null para una nota
+    /// independiente. El <c>DocEntry</c> se resuelve localmente por SQL.
+    /// </summary>
+    [JsonPropertyName("invoice_doc_num")]
+    public string? InvoiceDocNum { get; set; }
+
+    [JsonPropertyName("manual_amount")]
+    public decimal? ManualAmount { get; set; }
+
+    /// <summary>Total esperado del documento. Es la referencia contra la cual se contrasta SAP.</summary>
+    [JsonPropertyName("calculated_amount")]
+    public decimal CalculatedAmount { get; set; }
+
+    [JsonPropertyName("gl_account_code")]
+    public string? GlAccountCode { get; set; }
+
+    [JsonPropertyName("lines")]
+    public List<SapCreditNoteLine>? Lines { get; set; }
+
+    [JsonPropertyName("decided_by")]
+    public string? DecidedBy { get; set; }
+
+    [JsonPropertyName("decided_at")]
+    public DateTimeOffset DecidedAt { get; set; }
+}
+
+/// <summary>Una línea del crédito, ya decidida por el aprobador.</summary>
+/// <remarks>
+/// La cuenta y el almacén vienen POR LÍNEA y mandan sobre cualquier mapeo por
+/// motivo: una solicitud DAMAGED puede traer una línea 6020/07 y otra 4200/01.
+/// Verificado contra la cola real.
+/// </remarks>
+public sealed class SapCreditNoteLine
+{
+    [JsonPropertyName("item_code")]
+    public string? ItemCode { get; set; }
+
+    [JsonPropertyName("quantity")]
+    public decimal Quantity { get; set; }
+
+    /// <summary>
+    /// Motivo de ESTA línea. <b>Es solo para VERIFICAR, nunca para DECIDIR</b>:
+    /// la cuenta y el almacén llegan ya resueltos por el middleware y no se
+    /// derivan de acá. Lo único que se hace con él es comprobar coherencia con
+    /// el <c>doc_kind</c> y negarse a postear si no cuadra.
+    /// </summary>
+    /// <remarks>
+    /// Existe porque sin él el error sería INDETECTABLE: si el middleware leyera
+    /// mal el motivo, resolvería cuenta y almacén del mismo motivo equivocado, y
+    /// desde acá una línea DAMAGED mal clasificada se vería idéntica a un SHORT
+    /// legítimo. No habría contradicción que encontrar.
+    /// </remarks>
+    [JsonPropertyName("reason")]
+    public string? Reason { get; set; }
+
+    /// <summary>
+    /// Monto acreditado de esta línea, ya con cualquier ajuste del aprobador.
+    /// <b>Es el monto final</b>: no se recalcula contra el precio de la factura.
+    /// </summary>
+    [JsonPropertyName("approved_amount")]
+    public decimal ApprovedAmount { get; set; }
+
+    [JsonPropertyName("account_code")]
+    public string? AccountCode { get; set; }
+
+    /// <summary>Almacén al que vuelve la mercancía. Null en las líneas de servicio.</summary>
+    [JsonPropertyName("warehouse_code")]
+    public string? WarehouseCode { get; set; }
+
+    /// <summary>
+    /// Línea de la factura contra la que va este crédito, <b>elegida por el
+    /// aprobador</b> viendo las líneas reales. No se deduce: repetir el mismo
+    /// <c>item_code</c> en varias líneas de una factura es normal (promociones).
+    /// </summary>
+    [JsonPropertyName("base_line")]
+    public int? BaseLine { get; set; }
+}
+
 /// <summary>Cuerpo de <c>POST .../{taskId}/result</c>.</summary>
 public sealed class SapSyncResultReport
 {
