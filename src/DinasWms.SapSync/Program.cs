@@ -41,6 +41,14 @@ builder.Services
     .AddOptions<MiddlewareOptions>()
     .Bind(builder.Configuration.GetSection(MiddlewareOptions.SectionName));
 
+builder.Services
+    .AddOptions<InvoicesOptions>()
+    .Bind(builder.Configuration.GetSection(InvoicesOptions.SectionName));
+
+builder.Services
+    .AddOptions<ContinuousOptions>()
+    .Bind(builder.Configuration.GetSection(ContinuousOptions.SectionName));
+
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
 builder.Services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
@@ -49,19 +57,31 @@ builder.Services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
 builder.Services.AddSingleton<ForceRequestWatcher>();
 builder.Services.AddSingleton<ISyncCycle, SyncCycle>();
 
-// Tipos de documento a integrar, uno a la vez
-// (roadmap: IncomingPayments → CreditNotes → facturas → voids → retornos).
+builder.Services.AddSingleton<OrderInvoiceIntegrator>();
+
+// Tipos de documento que corren AUTOMÁTICOS. Las notas de crédito NO están acá a
+// propósito: se disparan a mano con --RunMode=CreditNoteProbe, por decisión de
+// negocio. Agregar una aquí es lo que la vuelve automática.
 builder.Services.AddSingleton<IDocumentSyncStep, IncomingPaymentsSyncStep>();
+builder.Services.AddSingleton<IDocumentSyncStep, OrderInvoicesSyncStep>();
 
 // Modos de ejecución. El default es el scheduler; los otros dos son
 // diagnósticos de una sola pasada:
 //   dotnet run -- --RunMode=SmokeTest
 //   dotnet run -- --RunMode=SqlProbe --Probe:CardCode=C100012 --Probe:DocNum=6152
-var runMode = builder.Configuration["RunMode"] ?? "Scheduler";
+var runMode = builder.Configuration["RunMode"] ?? "Continuous";
 var modoDesconocido = false;
 
 switch (runMode.ToLowerInvariant())
 {
+    // Modo normal de operación: sondeo rápido, sesión solo si hay trabajo.
+    case "continuous":
+        builder.Services.AddHostedService<ContinuousSyncWorker>();
+        break;
+
+    // Modo anterior, por ventanas horarias. Se conserva mientras el continuo se
+    // prueba en operación real: es código probado y volver a él es cambiar una
+    // línea de configuración, no revertir un commit.
     case "scheduler":
         builder.Services.AddHostedService<SyncSchedulerWorker>();
         break;
@@ -120,7 +140,7 @@ var logger = host.Services
 if (modoDesconocido)
 {
     logger.LogCritical(
-        "RunMode desconocido: '{Modo}'. Modos válidos: Scheduler, SmokeTest, SqlProbe, " +
+        "RunMode desconocido: '{Modo}'. Modos válidos: Continuous, Scheduler, SmokeTest, SqlProbe, " +
         "SlDiscovery, PaymentProbe, PaymentCancel, MiddlewareProbe, DraftInvoiceProbe, " +
         "InvoiceProbe, DraftCreditNoteProbe, CreditNoteProbe. No se arranca nada — en " +
         "particular, NO se " +
@@ -149,12 +169,22 @@ try
     else
     {
         host.Services.GetRequiredService<IOptions<ServiceLayerOptions>>().Value.Validate();
-        host.Services.GetRequiredService<IOptions<SchedulerOptions>>().Value.Validate();
 
-        // Ya hay un paso de documentos registrado que necesita SQL y middleware,
-        // así que ambos entran en la validación temprana del modo Scheduler.
+        // Los pasos registrados necesitan SQL, middleware y el almacén de salida.
         host.Services.GetRequiredService<IOptions<SqlOptions>>().Value.Validate();
         host.Services.GetRequiredService<IOptions<MiddlewareOptions>>().Value.Validate();
+        host.Services.GetRequiredService<IOptions<InvoicesOptions>>().Value.Validate();
+
+        // Cada modo valida solo su propia cadencia: exigir la ventana horaria en
+        // modo continuo obligaría a mantener configuración que ya no gobierna nada.
+        if (string.Equals(runMode, "Scheduler", StringComparison.OrdinalIgnoreCase))
+        {
+            host.Services.GetRequiredService<IOptions<SchedulerOptions>>().Value.Validate();
+        }
+        else
+        {
+            host.Services.GetRequiredService<IOptions<ContinuousOptions>>().Value.Validate();
+        }
     }
 }
 catch (Exception ex)

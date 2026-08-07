@@ -48,6 +48,16 @@ public sealed class IncomingPaymentsSyncStep : IDocumentSyncStep
 
     public string Name => "IncomingPayments";
 
+    public async Task<bool> HasPendingWorkAsync(CancellationToken cancellationToken)
+    {
+        // Solo middleware: ninguna sesión de Service Layer. Es lo que permite
+        // sondear seguido sin gastar licencias de SAP. Tampoco se hace login: se
+        // reusa el token vivo, y el 401 ya se resuelve con re-login y un
+        // reintento dentro del cliente.
+        var tareas = await ObtenerPendientesAsync(cancellationToken).ConfigureAwait(false);
+        return tareas.Count > 0;
+    }
+
     public async Task<DocumentSyncStepResult> ExecuteAsync(
         ServiceLayerSession session,
         CancellationToken cancellationToken)

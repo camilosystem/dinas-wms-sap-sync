@@ -18,6 +18,21 @@ public interface IDocumentSyncStep
     string Name { get; }
 
     /// <summary>
+    /// ¿Hay algo que hacer? <b>Sin abrir sesión de Service Layer.</b>
+    /// </summary>
+    /// <remarks>
+    /// Es lo que hace viable consultar cada pocos segundos. Preguntarle al
+    /// middleware es una llamada HTTP barata; una sesión de SAP no lo es, porque
+    /// compite por licencias con Attain. Separar las dos preguntas permite
+    /// sondear seguido y abrir sesión solo cuando hay trabajo real.
+    ///
+    /// Ante un fallo debe LANZAR, no devolver false: "no pude preguntar" y "no
+    /// hay nada" son cosas distintas, y confundirlas haría que una caída del
+    /// middleware se vea como reposo.
+    /// </remarks>
+    Task<bool> HasPendingWorkAsync(CancellationToken cancellationToken);
+
+    /// <summary>
     /// Procesa los documentos pendientes de este tipo usando la sesión del ciclo
     /// en curso. No debe hacer login ni logout: la sesión la administra el ciclo.
     /// </summary>
