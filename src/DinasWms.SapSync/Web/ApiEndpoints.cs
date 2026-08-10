@@ -1,5 +1,8 @@
+using DinasWms.SapSync.Configuration;
 using DinasWms.SapSync.Observability;
+using DinasWms.SapSync.Persistence;
 using DinasWms.SapSync.Sync;
+using Microsoft.Extensions.Options;
 
 namespace DinasWms.SapSync.Web;
 
@@ -158,6 +161,112 @@ public static class ApiEndpoints
             // /api/estado.
             return Results.Json(disparo, statusCode: 202);
         });
+
+        // --- Configuración ----------------------------------------------------
+        api.MapGet("/config", (HttpContext ctx, WebSessions sesiones,
+            IOptionsMonitor<ContinuousOptions> opciones, LocalStore almacen) =>
+        {
+            if (Rechazar(ctx, sesiones) is { } no)
+            {
+                return no;
+            }
+
+            var vigente = opciones.CurrentValue;
+
+            return Results.Json(new
+            {
+                pollSeconds = vigente.PollSeconds,
+                maxBackoffSeconds = vigente.MaxBackoffSeconds,
+                failuresBeforeBackoff = vigente.FailuresBeforeBackoff,
+                limites = new
+                {
+                    pollMinimo = ContinuousOptions.PollSecondsMinimo,
+                    pollMaximo = ContinuousOptions.PollSecondsMaximo,
+                    backoffMaximo = ContinuousOptions.MaxBackoffSegundosMaximo,
+                },
+                // Qué está sobreescrito desde la pantalla y qué viene del
+                // archivo: sin esto nadie sabría por qué un valor no es el que
+                // dice appsettings.json.
+                overrides = almacen.LeerConfiguracion(),
+            });
+        });
+
+        api.MapPost("/config", (HttpContext ctx, WebSessions sesiones, SolicitudConfig solicitud,
+            IOptionsMonitor<ContinuousOptions> opciones, LocalStore almacen,
+            SqliteConfigurationSource fuente, ILoggerFactory logs) =>
+        {
+            if (Rechazar(ctx, sesiones) is { } no)
+            {
+                return no;
+            }
+
+            var vigente = opciones.CurrentValue;
+
+            // Se arma el candidato y se valida ENTERO antes de tocar nada. La
+            // validación va en el borde a propósito: el bucle nunca debe llegar
+            // a ver una configuración inválida.
+            var candidato = new ContinuousOptions
+            {
+                PollSeconds = solicitud.PollSeconds ?? vigente.PollSeconds,
+                MaxBackoffSeconds = solicitud.MaxBackoffSeconds ?? vigente.MaxBackoffSeconds,
+                FailuresBeforeBackoff =
+                    solicitud.FailuresBeforeBackoff ?? vigente.FailuresBeforeBackoff,
+                RunOnStartup = vigente.RunOnStartup,
+            };
+
+            try
+            {
+                candidato.Validate();
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 400);
+            }
+
+            var usuario = sesiones.Validar(LeerToken(ctx))!.Usuario;
+            var seccion = ContinuousOptions.SectionName;
+
+            almacen.GuardarConfiguracion(
+                $"{seccion}:{nameof(ContinuousOptions.PollSeconds)}",
+                candidato.PollSeconds.ToString(), usuario);
+            almacen.GuardarConfiguracion(
+                $"{seccion}:{nameof(ContinuousOptions.MaxBackoffSeconds)}",
+                candidato.MaxBackoffSeconds.ToString(), usuario);
+            almacen.GuardarConfiguracion(
+                $"{seccion}:{nameof(ContinuousOptions.FailuresBeforeBackoff)}",
+                candidato.FailuresBeforeBackoff.ToString(), usuario);
+
+            // Acá es donde el cambio se vuelve efectivo sin reiniciar: relee de
+            // SQLite y dispara el reload token que escucha IOptionsMonitor.
+            fuente.Provider?.Recargar();
+
+            logs.CreateLogger("Configuracion").LogWarning(
+                "{Usuario} cambió la cadencia: sondeo {Poll}s, back-off hasta {Max}s tras {Umbral} " +
+                "fallos. Se aplica sin reiniciar.",
+                usuario,
+                candidato.PollSeconds,
+                candidato.MaxBackoffSeconds,
+                candidato.FailuresBeforeBackoff);
+
+            return Results.Json(new
+            {
+                pollSeconds = opciones.CurrentValue.PollSeconds,
+                maxBackoffSeconds = opciones.CurrentValue.MaxBackoffSeconds,
+                failuresBeforeBackoff = opciones.CurrentValue.FailuresBeforeBackoff,
+            });
+        });
+
+        // --- Historial --------------------------------------------------------
+        api.MapGet("/historial", (HttpContext ctx, WebSessions sesiones, LocalStore almacen,
+            int max = 50) =>
+        {
+            if (Rechazar(ctx, sesiones) is { } no)
+            {
+                return no;
+            }
+
+            return Results.Json(almacen.LeerHistorial(Math.Clamp(max, 1, 500)));
+        });
     }
 
     /// <summary>
@@ -195,3 +304,12 @@ public sealed record SolicitudLogin(string Usuario, string Clave);
 
 /// <summary>Cuerpo de <c>POST /api/disparar</c>.</summary>
 public sealed record SolicitudDisparo(string? Tipo, bool Confirmar);
+
+/// <summary>
+/// Cuerpo de <c>POST /api/config</c>. Todo opcional: lo que no venga conserva
+/// su valor vigente, así cambiar una cosa no obliga a reenviar el resto.
+/// </summary>
+public sealed record SolicitudConfig(
+    int? PollSeconds,
+    int? MaxBackoffSeconds,
+    int? FailuresBeforeBackoff);

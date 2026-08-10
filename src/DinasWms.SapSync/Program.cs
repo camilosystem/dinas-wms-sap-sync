@@ -2,6 +2,7 @@ using System.Reflection;
 using DinasWms.SapSync.Configuration;
 using DinasWms.SapSync.Middleware;
 using DinasWms.SapSync.Observability;
+using DinasWms.SapSync.Persistence;
 using DinasWms.SapSync.ServiceLayer;
 using DinasWms.SapSync.Sql;
 using DinasWms.SapSync.Sync;
@@ -165,6 +166,17 @@ void Configurar(
     //   dotnet user-secrets set "Sql:Password" "..."
     configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
 
+    // Overrides de la pantalla, respaldados por SQLite. Se agrega ÚLTIMO para
+    // que gane sobre appsettings.json y user-secrets — la superposición la hace
+    // el propio sistema de configuración, y por eso IOptionsMonitor recibe el
+    // aviso de cambio gratis. El archivo JSON nunca se reescribe.
+    var almacen = new LocalStore(Path.Combine(AppContext.BaseDirectory, "sap-sync.db"));
+    var fuenteSqlite = new SqliteConfigurationSource(almacen);
+    configuration.Add(fuenteSqlite);
+
+    services.AddSingleton(almacen);
+    services.AddSingleton(fuenteSqlite);
+
     services.AddOptions<ServiceLayerOptions>()
         .Bind(configuration.GetSection(ServiceLayerOptions.SectionName));
 
@@ -195,7 +207,14 @@ void Configurar(
     // buffer y el estado en vivo son baratos, y tenerlos siempre significa que
     // el día que haga falta mirar qué pasó no hay que reiniciar con otro modo.
     services.AddSingleton(new LogBuffer(capacity: 2000));
-    services.AddSingleton<SyncStatus>();
+    services.AddSingleton(sp =>
+    {
+        var estado = new SyncStatus(sp.GetRequiredService<TimeProvider>())
+        {
+            Historial = sp.GetRequiredService<LocalStore>(),
+        };
+        return estado;
+    });
     services.AddSingleton<LogBufferProvider>();
     services.AddSingleton<ILoggerProvider>(sp => sp.GetRequiredService<LogBufferProvider>());
     services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();

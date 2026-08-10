@@ -37,3 +37,8 @@ forzar-ahora.txt
 
 ## Varios
 *.log
+
+## Base local del sincronizador (config e historial): estado de la maquina
+*.db
+*.db-shm
+*.db-wal

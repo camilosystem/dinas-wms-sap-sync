@@ -36,12 +36,33 @@ public sealed class ContinuousOptions
     /// </summary>
     public bool RunOnStartup { get; set; }
 
+    /// <summary>
+    /// Sondeo mínimo admitido. Con 1 segundo el sincronizador martillaría al
+    /// middleware 86.400 veces por día para preguntar casi siempre "no hay
+    /// nada", y un dedazo en la pantalla no debería poder hacer eso.
+    /// </summary>
+    public const int PollSecondsMinimo = 5;
+
+    /// <summary>Sondeo máximo: más de una hora deja de ser "continuo".</summary>
+    public const int PollSecondsMaximo = 3600;
+
+    /// <summary>Tope máximo del back-off. Media hora sin reintentar ya es mucho.</summary>
+    public const int MaxBackoffSegundosMaximo = 1800;
+
     public void Validate()
     {
-        if (PollSeconds <= 0)
+        if (PollSeconds < PollSecondsMinimo || PollSeconds > PollSecondsMaximo)
         {
             throw new InvalidOperationException(
-                $"{SectionName}:{nameof(PollSeconds)} debe ser mayor que 0 (actual: {PollSeconds}).");
+                $"{SectionName}:{nameof(PollSeconds)} debe estar entre {PollSecondsMinimo} y " +
+                $"{PollSecondsMaximo} segundos (actual: {PollSeconds}).");
+        }
+
+        if (MaxBackoffSeconds > MaxBackoffSegundosMaximo)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:{nameof(MaxBackoffSeconds)} no puede pasar de " +
+                $"{MaxBackoffSegundosMaximo} segundos (actual: {MaxBackoffSeconds}).");
         }
 
         if (MaxBackoffSeconds < PollSeconds)

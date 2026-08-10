@@ -103,6 +103,12 @@ public sealed class SyncStatus
 
     public void RegistrarSesionCerrada() => Volatile.Write(ref _sesionSapAbierta, 0);
 
+    /// <summary>
+    /// Historial en disco. Opcional para no obligar a las pruebas a crear un
+    /// archivo, pero en producción siempre está.
+    /// </summary>
+    public Persistence.LocalStore? Historial { get; set; }
+
     public void RegistrarCicloTerminado(DateTimeOffset cuando, SyncCycleResult resultado)
     {
         // Un ciclo rechazado por el portón no cuenta: no corrió.
@@ -110,6 +116,17 @@ public sealed class SyncStatus
         {
             return;
         }
+
+        // Hoy cada ciclo dejaba su línea en el log y se olvidaba; sin esto no
+        // hay forma de ver tendencias de tiempos.
+        Historial?.RegistrarCiclo(
+            cuando,
+            resultado.Trigger.ToString(),
+            resultado.Success,
+            resultado.Duration,
+            resultado.TotalProcessed,
+            resultado.TotalFailed,
+            resultado.ErrorMessage);
 
         Interlocked.Increment(ref _ciclos);
         Interlocked.Add(ref _documentosIntegrados, resultado.TotalProcessed);

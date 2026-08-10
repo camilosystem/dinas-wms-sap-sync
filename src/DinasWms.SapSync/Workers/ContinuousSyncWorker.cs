@@ -38,16 +38,23 @@ public sealed class ContinuousSyncWorker : BackgroundService
     private readonly ISyncCycle _cycle;
     private readonly IReadOnlyList<IDocumentSyncStep> _steps;
     private readonly ForceRequestWatcher _forceWatcher;
-    private readonly ContinuousOptions _options;
+    private readonly IOptionsMonitor<ContinuousOptions> _opciones;
     private readonly SyncStatus _status;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ContinuousSyncWorker> _logger;
 
+    /// <remarks>
+    /// <see cref="IOptionsMonitor{T}"/> y no <see cref="IOptions{T}"/>: la
+    /// cadencia se cambia desde la pantalla con el worker corriendo. El valor se
+    /// lee en UN SOLO punto —al principio de cada vuelta— y nunca a mitad de un
+    /// ciclo, así cada vuelta trabaja sobre una instantánea tomada en un momento
+    /// conocido y no hace falta ningún lock.
+    /// </remarks>
     public ContinuousSyncWorker(
         ISyncCycle cycle,
         IEnumerable<IDocumentSyncStep> steps,
         ForceRequestWatcher forceWatcher,
-        IOptions<ContinuousOptions> options,
+        IOptionsMonitor<ContinuousOptions> opciones,
         SyncStatus status,
         TimeProvider timeProvider,
         ILogger<ContinuousSyncWorker> logger)
@@ -55,11 +62,14 @@ public sealed class ContinuousSyncWorker : BackgroundService
         _cycle = cycle;
         _steps = steps.ToArray();
         _forceWatcher = forceWatcher;
-        _options = options.Value;
+        _opciones = opciones;
         _status = status;
         _timeProvider = timeProvider;
         _logger = logger;
     }
+
+    /// <summary>La configuración vigente. Se consulta una vez por vuelta.</summary>
+    private ContinuousOptions Opciones => _opciones.CurrentValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -84,7 +94,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
     {
         await Task.Yield();
 
-        _options.Validate();
+        Opciones.Validate();
 
         _logger.LogInformation(
             "=== Sincronización continua ===\n" +
@@ -93,9 +103,9 @@ public sealed class ContinuousSyncWorker : BackgroundService
             "  Pasos automáticos: {Pasos}\n" +
             "  Forzar ahora:     crear el archivo {ForceFile}\n" +
             "  Sin ventana horaria: corre las 24 horas.",
-            _options.PollSeconds,
-            _options.FailuresBeforeBackoff,
-            _options.MaxBackoffSeconds,
+            Opciones.PollSeconds,
+            Opciones.FailuresBeforeBackoff,
+            Opciones.MaxBackoffSeconds,
             _steps.Count == 0 ? "(ninguno)" : string.Join(", ", _steps.Select(s => s.Name)),
             _forceWatcher.FullPath);
 
@@ -111,12 +121,12 @@ public sealed class ContinuousSyncWorker : BackgroundService
 
         // Lo que la pantalla necesita saber del arranque.
         _status.Modo = "Continuous";
-        _status.CadenciaSegundos = _options.PollSeconds;
+        _status.CadenciaSegundos = Opciones.PollSeconds;
         _status.PasosAutomaticos = _steps.Select(s => s.Name).ToArray();
 
         var fallosConsecutivos = 0;
 
-        if (_options.RunOnStartup && !stoppingToken.IsCancellationRequested)
+        if (Opciones.RunOnStartup && !stoppingToken.IsCancellationRequested)
         {
             fallosConsecutivos = await EjecutarCicloAsync(
                 SyncCycleTrigger.Startup, fallosConsecutivos, stoppingToken).ConfigureAwait(false);
@@ -124,7 +134,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var espera = _options.CalcularEspera(fallosConsecutivos);
+            var espera = Opciones.CalcularEspera(fallosConsecutivos);
 
             var forzado = await EsperarAsync(espera, stoppingToken).ConfigureAwait(false);
 
@@ -162,7 +172,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
                     "No se pudo consultar la cola del middleware ({Fallos} fallo(s) seguido(s)). " +
                     "Próximo intento en {Espera}s.",
                     fallosConsecutivos,
-                    (int)_options.CalcularEspera(fallosConsecutivos).TotalSeconds);
+                    (int)Opciones.CalcularEspera(fallosConsecutivos).TotalSeconds);
                 RegistrarSondeo(fallosConsecutivos);
                 continue;
             }
@@ -191,9 +201,16 @@ public sealed class ContinuousSyncWorker : BackgroundService
     /// </summary>
     private void RegistrarSondeo(int fallosConsecutivos)
     {
+        var opciones = Opciones;
         var ahora = _timeProvider.GetLocalNow();
-        _status.RegistrarSondeo(ahora, ahora + _options.CalcularEspera(fallosConsecutivos));
+
+        _status.RegistrarSondeo(ahora, ahora + opciones.CalcularEspera(fallosConsecutivos));
         _status.RegistrarFallosConsecutivos(fallosConsecutivos);
+
+        // Se republica cada vuelta y no solo al arrancar: si alguien cambió la
+        // cadencia desde la pantalla, lo que se muestra tiene que ser lo que el
+        // bucle está usando de verdad, no lo que se leyó al iniciar.
+        _status.CadenciaSegundos = opciones.PollSeconds;
     }
 
     /// <summary>
@@ -256,7 +273,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
                 "Ciclo con fallos ({Fallos} seguido(s)): {Error}. Próximo intento en {Espera}s.",
                 fallos,
                 resultado.ErrorMessage,
-                (int)_options.CalcularEspera(fallos).TotalSeconds);
+                (int)Opciones.CalcularEspera(fallos).TotalSeconds);
             return fallos;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -272,7 +289,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
                 "Fallo no controlado en el ciclo ({Fallos} seguido(s)). El bucle sigue activo; " +
                 "próximo intento en {Espera}s.",
                 fallos,
-                (int)_options.CalcularEspera(fallos).TotalSeconds);
+                (int)Opciones.CalcularEspera(fallos).TotalSeconds);
             return fallos;
         }
     }
