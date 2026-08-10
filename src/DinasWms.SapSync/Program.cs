@@ -11,127 +11,62 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
-var builder = Host.CreateApplicationBuilder(args);
+// ---------------------------------------------------------------------------
+// Dos formas de arrancar, un solo registro de servicios.
+//
+//   · Modos OPERATIVOS (Continuous, Scheduler): pueden levantar el servidor web
+//     que sirve la interfaz de monitoreo, en el mismo proceso que el worker.
+//   · Modos de DIAGNÓSTICO (los once probes): arrancan headless, sin Kestrel,
+//     sin puerto y sin autenticación. Son de una sola pasada y se apagan solos;
+//     levantarles un servidor web sería ruido y una superficie de ataque que no
+//     necesitan.
+//
+// El RunMode se lee ANTES de elegir builder, con una configuración mínima
+// desechable. El registro de servicios y la validación son compartidos: si las
+// dos ramas divergieran, un modo funcionaría y el otro no por razones invisibles.
+// ---------------------------------------------------------------------------
 
-// Las credenciales (SAP y SQL) viven en user-secrets, nunca en un archivo
-// versionado. Se registra explícitamente (y no solo vía el default de
-// Development) para que funcione igual corriendo como consola sin
-// DOTNET_ENVIRONMENT seteado.
-//   dotnet user-secrets set "ServiceLayer:UserName" "..."
-//   dotnet user-secrets set "Sql:Password" "..."
-builder.Configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+var configPrevia = new ConfigurationBuilder()
+    .SetBasePath(AppContext.BaseDirectory)
+    .AddJsonFile("appsettings.json", optional: true)
+    .AddEnvironmentVariables()
+    .AddCommandLine(args)
+    .Build();
 
-builder.Services
-    .AddOptions<ServiceLayerOptions>()
-    .Bind(builder.Configuration.GetSection(ServiceLayerOptions.SectionName));
+var runMode = configPrevia["RunMode"] ?? "Continuous";
 
-builder.Services
-    .AddOptions<SchedulerOptions>()
-    .Bind(builder.Configuration.GetSection(SchedulerOptions.SectionName));
+var esOperativo =
+    string.Equals(runMode, "Continuous", StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(runMode, "Scheduler", StringComparison.OrdinalIgnoreCase);
 
-builder.Services
-    .AddOptions<SqlOptions>()
-    .Bind(builder.Configuration.GetSection(SqlOptions.SectionName));
+// El servidor web solo se considera en modos operativos. En diagnóstico se
+// ignora la configuración a propósito: un probe nunca debe abrir un puerto.
+var opcionesWeb = new WebOptions();
+configPrevia.GetSection(WebOptions.SectionName).Bind(opcionesWeb);
+var conWeb = esOperativo && opcionesWeb.Enabled;
 
-builder.Services
-    .AddOptions<PaymentsOptions>()
-    .Bind(builder.Configuration.GetSection(PaymentsOptions.SectionName));
-
-builder.Services
-    .AddOptions<MiddlewareOptions>()
-    .Bind(builder.Configuration.GetSection(MiddlewareOptions.SectionName));
-
-builder.Services
-    .AddOptions<InvoicesOptions>()
-    .Bind(builder.Configuration.GetSection(InvoicesOptions.SectionName));
-
-builder.Services
-    .AddOptions<ContinuousOptions>()
-    .Bind(builder.Configuration.GetSection(ContinuousOptions.SectionName));
-
-builder.Services.AddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
-builder.Services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
-builder.Services.AddSingleton<IDocEntryResolver, DocEntryResolver>();
-builder.Services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
-builder.Services.AddSingleton<ForceRequestWatcher>();
-builder.Services.AddSingleton<ISyncCycle, SyncCycle>();
-
-builder.Services.AddSingleton<OrderInvoiceIntegrator>();
-
-// Tipos de documento que corren AUTOMÁTICOS. Las notas de crédito NO están acá a
-// propósito: se disparan a mano con --RunMode=CreditNoteProbe, por decisión de
-// negocio. Agregar una aquí es lo que la vuelve automática.
-builder.Services.AddSingleton<IDocumentSyncStep, IncomingPaymentsSyncStep>();
-builder.Services.AddSingleton<IDocumentSyncStep, OrderInvoicesSyncStep>();
-
-// Modos de ejecución. El default es el scheduler; los otros dos son
-// diagnósticos de una sola pasada:
-//   dotnet run -- --RunMode=SmokeTest
-//   dotnet run -- --RunMode=SqlProbe --Probe:CardCode=C100012 --Probe:DocNum=6152
-var runMode = builder.Configuration["RunMode"] ?? "Continuous";
 var modoDesconocido = false;
 
-switch (runMode.ToLowerInvariant())
-{
-    // Modo normal de operación: sondeo rápido, sesión solo si hay trabajo.
-    case "continuous":
-        builder.Services.AddHostedService<ContinuousSyncWorker>();
-        break;
+IHost host;
 
-    // Modo anterior, por ventanas horarias. Se conserva mientras el continuo se
-    // prueba en operación real: es código probado y volver a él es cambiar una
-    // línea de configuración, no revertir un commit.
-    case "scheduler":
-        builder.Services.AddHostedService<SyncSchedulerWorker>();
-        break;
-    case "smoketest":
-        builder.Services.AddHostedService<SessionSmokeTestWorker>();
-        break;
-    case "sqlprobe":
-        builder.Services.AddHostedService<SqlProbeWorker>();
-        break;
-    case "sldiscovery":
-        builder.Services.AddHostedService<ServiceLayerDiscoveryWorker>();
-        break;
-    case "paymentprobe":
-        builder.Services.AddHostedService<PaymentProbeWorker>();
-        break;
-    case "paymentcancel":
-        builder.Services.AddHostedService<PaymentCancelWorker>();
-        break;
-    case "draftinvoiceprobe":
-        builder.Services.AddHostedService<DraftInvoiceProbeWorker>();
-        break;
-    case "invoiceprobe":
-        builder.Services.AddHostedService<InvoiceProbeWorker>();
-        break;
-    case "draftcreditnoteprobe":
-        builder.Services.AddHostedService<DraftCreditNoteProbeWorker>();
-        break;
-    case "creditnoteprobe":
-        builder.Services.AddHostedService<CreditNoteProbeWorker>();
-        break;
-    case "middlewareprobe":
-        builder.Services.AddHostedService<MiddlewareProbeWorker>();
-        break;
-    default:
-        // Un RunMode desconocido NO cae al scheduler. Antes sí, y eso hizo que un
-        // binario viejo (compilado antes de que existiera un modo nuevo) arrancara
-        // el scheduler en silencio cuando se le pidió un diagnóstico: el proceso
-        // se quedó corriendo ciclos contra SAP sin que nadie lo pidiera. Fallar
-        // ruidosamente es lo correcto.
-        modoDesconocido = true;
-        break;
+if (conWeb)
+{
+    opcionesWeb.Validate();
+
+    var builder = WebApplication.CreateBuilder(args);
+    Configurar(builder.Configuration, builder.Services, builder.Logging);
+
+    builder.WebHost.UseUrls(opcionesWeb.BuildUrls());
+
+    host = builder.Build();
 }
-
-builder.Logging.AddSimpleConsole(o =>
+else
 {
-    o.SingleLine = false;
-    o.TimestampFormat = "HH:mm:ss ";
-});
+    var builder = Host.CreateApplicationBuilder(args);
+    Configurar(builder.Configuration, builder.Services, builder.Logging);
 
-var host = builder.Build();
+    host = builder.Build();
+}
 
 var logger = host.Services
     .GetRequiredService<ILoggerFactory>()
@@ -154,10 +89,6 @@ if (modoDesconocido)
 // ciclo que faltaba una credencial o que el horario está mal escrito. Además
 // devuelve un código de salida distinto de cero, que es lo que el SCM (cuando
 // esto sea un Windows Service) necesita para saber que no arrancó bien.
-//
-// SqlOptions solo se valida en el modo que lo usa: todavía no hay ningún paso de
-// documentos que necesite SQL. Cuando se registre el primero (IncomingPayments),
-// pasa a validarse siempre.
 try
 {
     var esSqlProbe = string.Equals(runMode, "SqlProbe", StringComparison.OrdinalIgnoreCase);
@@ -195,6 +126,133 @@ catch (Exception ex)
 
 logger.LogInformation("Modo de ejecución: {Modo}", runMode);
 
+if (conWeb)
+{
+    logger.LogInformation(
+        "Interfaz de monitoreo escuchando en: {Urls}", string.Join(", ", opcionesWeb.BuildUrls()));
+}
+
 await host.RunAsync();
 
 return Environment.ExitCode;
+
+// ---------------------------------------------------------------------------
+
+// Registro compartido por las dos ramas. Recibe las tres superficies que ambos
+// builders exponen igual, así no hay dos listas de servicios que mantener.
+void Configurar(
+    IConfigurationManager configuration,
+    IServiceCollection services,
+    ILoggingBuilder logging)
+{
+    // Las credenciales (SAP y SQL) viven en user-secrets, nunca en un archivo
+    // versionado. Se registra explícitamente (y no solo vía el default de
+    // Development) para que funcione igual corriendo como consola sin
+    // DOTNET_ENVIRONMENT seteado.
+    //   dotnet user-secrets set "ServiceLayer:UserName" "..."
+    //   dotnet user-secrets set "Sql:Password" "..."
+    configuration.AddUserSecrets(Assembly.GetExecutingAssembly(), optional: true);
+
+    services.AddOptions<ServiceLayerOptions>()
+        .Bind(configuration.GetSection(ServiceLayerOptions.SectionName));
+
+    services.AddOptions<SchedulerOptions>()
+        .Bind(configuration.GetSection(SchedulerOptions.SectionName));
+
+    services.AddOptions<SqlOptions>()
+        .Bind(configuration.GetSection(SqlOptions.SectionName));
+
+    services.AddOptions<PaymentsOptions>()
+        .Bind(configuration.GetSection(PaymentsOptions.SectionName));
+
+    services.AddOptions<MiddlewareOptions>()
+        .Bind(configuration.GetSection(MiddlewareOptions.SectionName));
+
+    services.AddOptions<InvoicesOptions>()
+        .Bind(configuration.GetSection(InvoicesOptions.SectionName));
+
+    services.AddOptions<ContinuousOptions>()
+        .Bind(configuration.GetSection(ContinuousOptions.SectionName));
+
+    services.AddOptions<WebOptions>()
+        .Bind(configuration.GetSection(WebOptions.SectionName));
+
+    services.AddSingleton(TimeProvider.System);
+    services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
+    services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
+    services.AddSingleton<IDocEntryResolver, DocEntryResolver>();
+    services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
+    services.AddSingleton<ForceRequestWatcher>();
+    services.AddSingleton<ISyncCycle, SyncCycle>();
+
+    services.AddSingleton<OrderInvoiceIntegrator>();
+
+    // Tipos de documento que corren AUTOMÁTICOS. Las notas de crédito NO están
+    // acá a propósito: se disparan a mano con --RunMode=CreditNoteProbe, por
+    // decisión de negocio. Agregar una aquí es lo que la vuelve automática.
+    services.AddSingleton<IDocumentSyncStep, IncomingPaymentsSyncStep>();
+    services.AddSingleton<IDocumentSyncStep, OrderInvoicesSyncStep>();
+
+    // Modos de ejecución. El default es el continuo; los demás son diagnósticos
+    // de una sola pasada:
+    //   dotnet run -- --RunMode=SmokeTest
+    //   dotnet run -- --RunMode=SqlProbe --Probe:CardCode=C100012 --Probe:DocNum=6152
+    switch (runMode.ToLowerInvariant())
+    {
+        // Modo normal de operación: sondeo rápido, sesión solo si hay trabajo.
+        case "continuous":
+            services.AddHostedService<ContinuousSyncWorker>();
+            break;
+
+        // Modo anterior, por ventanas horarias. Se conserva mientras el continuo
+        // se prueba en operación real: es código probado y volver a él es
+        // cambiar una línea de configuración, no revertir un commit.
+        case "scheduler":
+            services.AddHostedService<SyncSchedulerWorker>();
+            break;
+        case "smoketest":
+            services.AddHostedService<SessionSmokeTestWorker>();
+            break;
+        case "sqlprobe":
+            services.AddHostedService<SqlProbeWorker>();
+            break;
+        case "sldiscovery":
+            services.AddHostedService<ServiceLayerDiscoveryWorker>();
+            break;
+        case "paymentprobe":
+            services.AddHostedService<PaymentProbeWorker>();
+            break;
+        case "paymentcancel":
+            services.AddHostedService<PaymentCancelWorker>();
+            break;
+        case "draftinvoiceprobe":
+            services.AddHostedService<DraftInvoiceProbeWorker>();
+            break;
+        case "invoiceprobe":
+            services.AddHostedService<InvoiceProbeWorker>();
+            break;
+        case "draftcreditnoteprobe":
+            services.AddHostedService<DraftCreditNoteProbeWorker>();
+            break;
+        case "creditnoteprobe":
+            services.AddHostedService<CreditNoteProbeWorker>();
+            break;
+        case "middlewareprobe":
+            services.AddHostedService<MiddlewareProbeWorker>();
+            break;
+        default:
+            // Un RunMode desconocido NO cae al scheduler. Antes sí, y eso hizo
+            // que un binario viejo (compilado antes de que existiera un modo
+            // nuevo) arrancara el scheduler en silencio cuando se le pidió un
+            // diagnóstico: el proceso se quedó corriendo ciclos contra SAP sin
+            // que nadie lo pidiera. Fallar ruidosamente es lo correcto.
+            modoDesconocido = true;
+            break;
+    }
+
+    logging.AddSimpleConsole(o =>
+    {
+        o.SingleLine = false;
+        o.TimestampFormat = "HH:mm:ss ";
+    });
+}

@@ -1,4 +1,9 @@
-<Project Sdk="Microsoft.NET.Sdk.Worker">
+<!-- Sdk.Web y no Sdk.Worker: el sincronizador sirve su propia interfaz de
+     monitoreo en el mismo proceso, para que la pantalla lea el estado en vivo
+     de la memoria compartida en vez de inventar comunicación entre procesos.
+     Los modos de diagnóstico siguen arrancando SIN servidor web — ver la
+     bifurcación en Program.cs. -->
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
