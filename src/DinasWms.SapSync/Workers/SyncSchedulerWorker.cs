@@ -177,6 +177,14 @@ public sealed class SyncSchedulerWorker : BackgroundService
         {
             var resultado = await _cycle.RunAsync(trigger, cancellationToken).ConfigureAwait(false);
 
+            if (resultado.RejectedByConcurrency)
+            {
+                // Ya hay un ciclo en curso (un disparo manual, o el centinela).
+                // No es un error: es la garantía funcionando.
+                _logger.LogInformation("Ciclo omitido: {Detalle}.", resultado.ErrorMessage);
+                return;
+            }
+
             if (resultado.Success)
             {
                 _logger.LogInformation(

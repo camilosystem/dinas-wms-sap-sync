@@ -204,6 +204,18 @@ public sealed class ContinuousSyncWorker : BackgroundService
             var resultado = await _cycle.RunAsync(trigger, cancellationToken).ConfigureAwait(false);
             reloj.Stop();
 
+            if (resultado.RejectedByConcurrency)
+            {
+                // El portón lo rechazó porque ya hay un ciclo en curso. NO es un
+                // fallo: contarlo como tal dispararía el back-off y ensancharía
+                // el intervalo por una razón sana. Se reintenta en el próximo
+                // sondeo con la cadencia normal.
+                _logger.LogInformation(
+                    "Ciclo omitido: {Detalle}. Se reintenta en el próximo sondeo.",
+                    resultado.ErrorMessage);
+                return fallosConsecutivos;
+            }
+
             if (resultado.Success)
             {
                 _logger.LogInformation(

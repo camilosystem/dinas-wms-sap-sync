@@ -183,6 +183,10 @@ void Configurar(
     services.AddSingleton<IDocEntryResolver, DocEntryResolver>();
     services.AddSingleton<IMiddlewareClient, MiddlewareClient>();
     services.AddSingleton<ForceRequestWatcher>();
+
+    // Permiso único para correr un ciclo. Singleton a propósito: si hubiera uno
+    // por scope, dejaría de ser único y no garantizaría nada.
+    services.AddSingleton<SyncCycleGate>();
     services.AddSingleton<ISyncCycle, SyncCycle>();
 
     services.AddSingleton<OrderInvoiceIntegrator>();

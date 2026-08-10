@@ -23,15 +23,18 @@ public sealed class SyncCycle : ISyncCycle
 {
     private readonly IServiceLayerSessionFactory _sessionFactory;
     private readonly IReadOnlyList<IDocumentSyncStep> _steps;
+    private readonly SyncCycleGate _gate;
     private readonly ILogger<SyncCycle> _logger;
 
     public SyncCycle(
         IServiceLayerSessionFactory sessionFactory,
         IEnumerable<IDocumentSyncStep> steps,
+        SyncCycleGate gate,
         ILogger<SyncCycle> logger)
     {
         _sessionFactory = sessionFactory;
         _steps = steps.ToArray();
+        _gate = gate;
         _logger = logger;
     }
 
@@ -39,6 +42,19 @@ public sealed class SyncCycle : ISyncCycle
         SyncCycleTrigger trigger,
         CancellationToken cancellationToken)
     {
+        // El permiso se pide ANTES de abrir la sesión, y esa precedencia importa:
+        // si se rechaza, no llega a existir una sesión de Service Layer que
+        // cerrar ni una licencia consumida por nada.
+        using var permiso = await _gate
+            .TryEnterAsync(trigger.ToString(), cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+
+        if (permiso is null)
+        {
+            return SyncCycleResult.Rejected(
+                trigger, "ya hay un ciclo en curso; este disparo se descarta");
+        }
+
         var reloj = Stopwatch.StartNew();
         _logger.LogInformation("--- Inicio de ciclo ({Trigger}) ---", trigger);
 
