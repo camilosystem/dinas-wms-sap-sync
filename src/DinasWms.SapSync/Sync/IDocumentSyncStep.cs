@@ -18,6 +18,17 @@ public interface IDocumentSyncStep
     string Name { get; }
 
     /// <summary>
+    /// ¿Lo corre el bucle automático, o solo se dispara a mano?
+    /// </summary>
+    /// <remarks>
+    /// Las notas de crédito son manual-only por decisión de negocio: se
+    /// disparan desde la pantalla, nunca solas. Tenerlo como propiedad del paso
+    /// —y no como una lista en el worker— hace que la decisión viva junto al
+    /// paso y no se pueda perder al registrar uno nuevo.
+    /// </remarks>
+    bool RunsAutomatically => true;
+
+    /// <summary>
     /// ¿Hay algo que hacer? <b>Sin abrir sesión de Service Layer.</b>
     /// </summary>
     /// <remarks>

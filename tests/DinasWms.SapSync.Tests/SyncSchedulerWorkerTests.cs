@@ -118,9 +118,16 @@ public class SyncSchedulerWorkerTests
     {
         public int Ejecuciones { get; private set; }
 
-        public Task<SyncCycleResult> RunAsync(SyncCycleTrigger trigger, CancellationToken cancellationToken)
+        /// <summary>Los pasos pedidos en la última ejecución, si se filtró.</summary>
+        public IReadOnlyCollection<string>? UltimosPasosPedidos { get; private set; }
+
+        public Task<SyncCycleResult> RunAsync(
+            SyncCycleTrigger trigger,
+            CancellationToken cancellationToken,
+            IReadOnlyCollection<string>? soloPasos = null)
         {
             Ejecuciones++;
+            UltimosPasosPedidos = soloPasos;
             return Task.FromResult(new SyncCycleResult(
                 trigger, true, TimeSpan.Zero, 0, 0, Array.Empty<string>()));
         }

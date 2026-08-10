@@ -5,6 +5,7 @@ using DinasWms.SapSync.Observability;
 using DinasWms.SapSync.ServiceLayer;
 using DinasWms.SapSync.Sql;
 using DinasWms.SapSync.Sync;
+using DinasWms.SapSync.Web;
 using DinasWms.SapSync.Workers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,9 +58,19 @@ if (conWeb)
     var builder = WebApplication.CreateBuilder(args);
     Configurar(builder.Configuration, builder.Services, builder.Logging);
 
+    builder.Services.AddSingleton<WebSessions>();
+    builder.Services.AddSingleton<ProxyLoginClient>();
+    builder.Services.AddSingleton<ManualTriggerService>();
+
     builder.WebHost.UseUrls(opcionesWeb.BuildUrls());
 
-    host = builder.Build();
+    var app = builder.Build();
+
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+    app.MapApi();
+
+    host = app;
 }
 else
 {

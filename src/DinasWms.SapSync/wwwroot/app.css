@@ -1,0 +1,102 @@
+/* Un usuario técnico, una pantalla. La prioridad es que la información sea
+   precisa y legible de un vistazo, no que se vea elaborada. */
+
+:root {
+  --fondo: #12151a;
+  --tarjeta: #1b1f27;
+  --borde: #2c323d;
+  --texto: #d8dee9;
+  --tenue: #8b95a7;
+  --ok: #7cc47f;
+  --atencion: #e0b341;
+  --error: #e06c6c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 1.5rem;
+  background: var(--fondo);
+  color: var(--texto);
+  font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+h1 { font-size: 1.25rem; margin: 0; }
+h2 { font-size: 1rem; margin: 0 0 .75rem; color: var(--tenue); text-transform: uppercase;
+     letter-spacing: .05em; }
+
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 1rem;
+}
+
+.sesion { display: flex; align-items: center; gap: .75rem; color: var(--tenue); }
+
+.tarjeta {
+  background: var(--tarjeta);
+  border: 1px solid var(--borde);
+  border-radius: 6px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+  max-width: 1100px;
+}
+
+.oculto { display: none; }
+
+.rejilla {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: .6rem;
+}
+
+.celda { display: flex; flex-direction: column; }
+.etiqueta { color: var(--tenue); font-size: .75rem; text-transform: uppercase; }
+.valor { font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+
+.ok { color: var(--ok); }
+.atencion { color: var(--atencion); }
+.error { color: var(--error); }
+
+.ayuda { color: var(--tenue); font-size: .85rem; }
+
+form { display: flex; flex-direction: column; gap: .75rem; max-width: 320px; }
+label { display: flex; flex-direction: column; gap: .25rem; color: var(--tenue); }
+
+input[type="text"], input[type="password"], input:not([type]) {
+  background: #0e1116; border: 1px solid var(--borde); color: var(--texto);
+  padding: .5rem; border-radius: 4px; font: inherit;
+}
+
+button {
+  background: #30465e; color: var(--texto); border: 1px solid var(--borde);
+  padding: .5rem .9rem; border-radius: 4px; cursor: pointer; font: inherit;
+}
+button:hover { filter: brightness(1.2); }
+
+button.secundario { background: transparent; color: var(--tenue); }
+
+/* Los que escriben en SAP se ven distintos a propósito. */
+button.peligro { background: #6b3030; border-color: #8a4040; }
+
+.botonera { display: flex; gap: .6rem; flex-wrap: wrap; margin-bottom: .75rem; }
+
+.linea-opcion { flex-direction: row; align-items: center; gap: .5rem; margin-bottom: .5rem; }
+
+pre#log {
+  background: #0e1116;
+  border: 1px solid var(--borde);
+  border-radius: 4px;
+  padding: .75rem;
+  height: 420px;
+  overflow: auto;
+  margin: 0;
+  font: 12px/1.45 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+pre#log span { display: block; }
+.nivel-Warning { color: var(--atencion); }
+.nivel-Error, .nivel-Critical { color: var(--error); }
+.nivel-Debug, .nivel-Trace { color: var(--tenue); }

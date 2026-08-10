@@ -8,7 +8,15 @@ namespace DinasWms.SapSync.Sync;
 /// <summary>Ejecuta un ciclo de trabajo completo.</summary>
 public interface ISyncCycle
 {
-    Task<SyncCycleResult> RunAsync(SyncCycleTrigger trigger, CancellationToken cancellationToken);
+    /// <param name="soloPasos">
+    /// Si viene, se corren únicamente esos pasos por nombre — es lo que usa el
+    /// disparo manual por tipo. Si es null, se corren los que declaran
+    /// <see cref="IDocumentSyncStep.RunsAutomatically"/>.
+    /// </param>
+    Task<SyncCycleResult> RunAsync(
+        SyncCycleTrigger trigger,
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? soloPasos = null);
 }
 
 /// <summary>
@@ -25,28 +33,34 @@ public sealed class SyncCycle : ISyncCycle
     private readonly IServiceLayerSessionFactory _sessionFactory;
     private readonly IReadOnlyList<IDocumentSyncStep> _steps;
     private readonly SyncCycleGate _gate;
-    private readonly SyncStatus? _status;
+    private readonly SyncStatus _status;
     private readonly ILogger<SyncCycle> _logger;
 
+    /// <remarks>
+    /// <paramref name="status"/> es OBLIGATORIO y no opcional. Se probó con un
+    /// default nulo "para no molestar a las pruebas" y el contenedor no lo
+    /// inyectó: el ciclo corría, abría sesión con SAP, y la pantalla mostraba
+    /// "sesión cerrada" todo el tiempo. Una instrumentación que se desactiva
+    /// sola y en silencio es peor que no tenerla, porque se le cree.
+    /// </remarks>
     public SyncCycle(
         IServiceLayerSessionFactory sessionFactory,
         IEnumerable<IDocumentSyncStep> steps,
         SyncCycleGate gate,
-        ILogger<SyncCycle> logger,
-        SyncStatus? status = null)
+        SyncStatus status,
+        ILogger<SyncCycle> logger)
     {
         _sessionFactory = sessionFactory;
         _steps = steps.ToArray();
         _gate = gate;
-        _logger = logger;
-        // Opcional para no obligar a las pruebas a construir instrumentación que
-        // no están ejercitando.
         _status = status;
+        _logger = logger;
     }
 
     public async Task<SyncCycleResult> RunAsync(
         SyncCycleTrigger trigger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyCollection<string>? soloPasos = null)
     {
         // El permiso se pide ANTES de abrir la sesión, y esa precedencia importa:
         // si se rechaza, no llega a existir una sesión de Service Layer que
@@ -64,6 +78,21 @@ public sealed class SyncCycle : ISyncCycle
         var reloj = Stopwatch.StartNew();
         _logger.LogInformation("--- Inicio de ciclo ({Trigger}) ---", trigger);
 
+        // Qué pasos corren en este ciclo. Sin filtro, los automáticos; con
+        // filtro, exactamente los pedidos — así el disparo manual puede correr
+        // un paso que el bucle nunca toca.
+        var pasos = soloPasos is null
+            ? _steps.Where(s => s.RunsAutomatically).ToArray()
+            : _steps.Where(s => soloPasos.Contains(s.Name, StringComparer.OrdinalIgnoreCase)).ToArray();
+
+        if (soloPasos is not null && pasos.Length == 0)
+        {
+            return SyncCycleResult.Failure(
+                trigger,
+                TimeSpan.Zero,
+                $"No hay ningún paso registrado con nombre en [{string.Join(", ", soloPasos)}].");
+        }
+
         try
         {
             await using var session = await _sessionFactory
@@ -73,9 +102,9 @@ public sealed class SyncCycle : ISyncCycle
             // A partir de acá hay una licencia de SAP consumida. La pantalla
             // necesita poder decirlo, porque es el recurso que se comparte con
             // Attain.
-            _status?.RegistrarSesionAbierta();
+            _status.RegistrarSesionAbierta();
 
-            if (_steps.Count == 0)
+            if (pasos.Length == 0)
             {
                 // Estado esperado en esta fase: el scheduler y la sesión ya están,
                 // pero todavía no se construyó ningún tipo de documento. El ciclo
@@ -89,12 +118,12 @@ public sealed class SyncCycle : ISyncCycle
                     trigger, true, reloj.Elapsed, 0, 0, Array.Empty<string>());
             }
 
-            var resumenes = new List<string>(_steps.Count);
+            var resumenes = new List<string>(pasos.Length);
             var totalProcesados = 0;
             var totalFallidos = 0;
             var huboErrorDePaso = false;
 
-            foreach (var step in _steps)
+            foreach (var step in pasos)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -167,7 +196,7 @@ public sealed class SyncCycle : ISyncCycle
             // que pase (el await using de arriba), así que el indicador tiene que
             // apagarse igual o la pantalla mostraría una licencia tomada para
             // siempre después de un ciclo que falló.
-            _status?.RegistrarSesionCerrada();
+            _status.RegistrarSesionCerrada();
 
             _logger.LogInformation(
                 "--- Fin de ciclo ({Trigger}) en {Duracion} ---",

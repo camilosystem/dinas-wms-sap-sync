@@ -1,3 +1,4 @@
+using DinasWms.SapSync.Observability;
 using DinasWms.SapSync.ServiceLayer;
 using DinasWms.SapSync.Sync;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -29,7 +30,7 @@ public class SyncCycleGateIntegrationTests
     }
 
     private static SyncCycle Ciclo(SyncCycleGate porton, IServiceLayerSessionFactory fabrica) =>
-        new(fabrica, [], porton, NullLogger<SyncCycle>.Instance);
+        new(fabrica, [], porton, new SyncStatus(TimeProvider.System), NullLogger<SyncCycle>.Instance);
 
     [Fact]
     public async Task ConElPortonTomado_elCicloSeRechazaSinAbrirSesion()

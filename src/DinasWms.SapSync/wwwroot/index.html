@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Que un buscador o un prefetch no toque esto. La defensa real es que todo
+     exige sesión y que lo que escribe es POST, pero decirlo tampoco cuesta. -->
+<meta name="robots" content="noindex, nofollow">
+<title>Sincronizador SAP — Dinas WMS</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<section id="login" class="tarjeta oculto">
+  <h1>Sincronizador SAP</h1>
+  <p class="ayuda">Entrá con tu usuario del WMS. Requiere rol ADMIN.</p>
+  <form id="form-login" autocomplete="off">
+    <label>Usuario <input id="usuario" name="usuario" required autocomplete="username"></label>
+    <label>Contraseña <input id="clave" name="clave" type="password" required
+                             autocomplete="current-password"></label>
+    <button type="submit">Entrar</button>
+  </form>
+  <p id="error-login" class="error"></p>
+</section>
+
+<main id="panel" class="oculto">
+  <header>
+    <h1>Sincronizador SAP</h1>
+    <div class="sesion">
+      <span id="quien"></span>
+      <button id="salir" class="secundario">Salir</button>
+    </div>
+  </header>
+
+  <section class="tarjeta">
+    <h2>Estado</h2>
+    <div class="rejilla" id="estado"></div>
+  </section>
+
+  <section class="tarjeta">
+    <h2>Disparo manual</h2>
+    <p class="ayuda">
+      Estos botones <strong>crean documentos reales en SAP</strong>. Cada uno pide
+      confirmación antes de enviar.
+    </p>
+    <div id="botones-disparo" class="botonera"></div>
+    <div id="resultado-disparo"></div>
+  </section>
+
+  <section class="tarjeta">
+    <h2>Log en vivo</h2>
+    <label class="linea-opcion">
+      <input type="checkbox" id="autoscroll" checked> Seguir el final
+      <span id="info-buffer" class="ayuda"></span>
+    </label>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
