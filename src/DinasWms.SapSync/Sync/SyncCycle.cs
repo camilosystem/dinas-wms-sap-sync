@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DinasWms.SapSync.Observability;
 using DinasWms.SapSync.ServiceLayer;
 using Microsoft.Extensions.Logging;
 
@@ -24,18 +25,23 @@ public sealed class SyncCycle : ISyncCycle
     private readonly IServiceLayerSessionFactory _sessionFactory;
     private readonly IReadOnlyList<IDocumentSyncStep> _steps;
     private readonly SyncCycleGate _gate;
+    private readonly SyncStatus? _status;
     private readonly ILogger<SyncCycle> _logger;
 
     public SyncCycle(
         IServiceLayerSessionFactory sessionFactory,
         IEnumerable<IDocumentSyncStep> steps,
         SyncCycleGate gate,
-        ILogger<SyncCycle> logger)
+        ILogger<SyncCycle> logger,
+        SyncStatus? status = null)
     {
         _sessionFactory = sessionFactory;
         _steps = steps.ToArray();
         _gate = gate;
         _logger = logger;
+        // Opcional para no obligar a las pruebas a construir instrumentación que
+        // no están ejercitando.
+        _status = status;
     }
 
     public async Task<SyncCycleResult> RunAsync(
@@ -63,6 +69,11 @@ public sealed class SyncCycle : ISyncCycle
             await using var session = await _sessionFactory
                 .OpenAsync(cancellationToken)
                 .ConfigureAwait(false);
+
+            // A partir de acá hay una licencia de SAP consumida. La pantalla
+            // necesita poder decirlo, porque es el recurso que se comparte con
+            // Attain.
+            _status?.RegistrarSesionAbierta();
 
             if (_steps.Count == 0)
             {
@@ -152,6 +163,12 @@ public sealed class SyncCycle : ISyncCycle
         }
         finally
         {
+            // En el finally y no al final del try: la sesión se cierra pase lo
+            // que pase (el await using de arriba), así que el indicador tiene que
+            // apagarse igual o la pantalla mostraría una licencia tomada para
+            // siempre después de un ciclo que falló.
+            _status?.RegistrarSesionCerrada();
+
             _logger.LogInformation(
                 "--- Fin de ciclo ({Trigger}) en {Duracion} ---",
                 trigger,

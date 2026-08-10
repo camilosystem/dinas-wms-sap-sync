@@ -81,6 +81,64 @@ public class SyncCycleGateIntegrationTests
     }
 
     [Fact]
+    public async Task UnCicloQueRevienta_igualLiberaElPermiso()
+    {
+        // El modo de falla que convierte la red de seguridad en un paro total: si
+        // un ciclo falla a mitad y el permiso no se libera, a partir de ahí TODO
+        // recibe 409 — el bucle continuo, los disparos manuales y el centinela —
+        // y el sistema se traba entero sin avisar.
+        var porton = new SyncCycleGate(NullLogger<SyncCycleGate>.Instance);
+        var fabrica = new FabricaEspia();
+
+        var resultado = await Ciclo(porton, fabrica).RunAsync(SyncCycleTrigger.Forced, default);
+
+        Assert.True(fabrica.FueLlamada);
+        Assert.False(resultado.Success);
+        Assert.False(resultado.RejectedByConcurrency);
+
+        // Lo que importa: el portón quedó libre pese a la explosión.
+        Assert.False(porton.EnUso);
+        using var siguiente = await porton.TryEnterAsync("el siguiente");
+        Assert.NotNull(siguiente);
+    }
+
+    [Fact]
+    public async Task DiezCiclosSeguidosQueRevientan_noDejanElPortonTomado()
+    {
+        // Una racha de fallos es justo cuando un permiso filtrado pasaría
+        // desapercibido: todo falla igual, y el motivo real quedaría tapado.
+        var porton = new SyncCycleGate(NullLogger<SyncCycleGate>.Instance);
+
+        for (var i = 0; i < 10; i++)
+        {
+            await Ciclo(porton, new FabricaEspia()).RunAsync(SyncCycleTrigger.Scheduled, default);
+        }
+
+        Assert.False(porton.EnUso);
+        using var siguiente = await porton.TryEnterAsync("el siguiente");
+        Assert.NotNull(siguiente);
+    }
+
+    [Fact]
+    public async Task UnaExcepcionQueEscapaDelUsing_igualLibera()
+    {
+        // Este es el contrato que va a heredar el endpoint de disparo manual
+        // cuando corra el ciclo en segundo plano: pase lo que pase adentro del
+        // using, el permiso vuelve.
+        var porton = new SyncCycleGate(NullLogger<SyncCycleGate>.Instance);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            using var permiso = await porton.TryEnterAsync("tarea de fondo");
+            throw new InvalidOperationException("revienta a mitad");
+        });
+
+        Assert.False(porton.EnUso);
+        using var siguiente = await porton.TryEnterAsync("el siguiente");
+        Assert.NotNull(siguiente);
+    }
+
+    [Fact]
     public async Task TerminadoElCiclo_elSiguienteDisparoYaNoSeRechaza()
     {
         var porton = new SyncCycleGate(NullLogger<SyncCycleGate>.Instance);

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using DinasWms.SapSync.Configuration;
+using DinasWms.SapSync.Observability;
 using DinasWms.SapSync.Sync;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -38,6 +39,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
     private readonly IReadOnlyList<IDocumentSyncStep> _steps;
     private readonly ForceRequestWatcher _forceWatcher;
     private readonly ContinuousOptions _options;
+    private readonly SyncStatus _status;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<ContinuousSyncWorker> _logger;
 
@@ -46,6 +48,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
         IEnumerable<IDocumentSyncStep> steps,
         ForceRequestWatcher forceWatcher,
         IOptions<ContinuousOptions> options,
+        SyncStatus status,
         TimeProvider timeProvider,
         ILogger<ContinuousSyncWorker> logger)
     {
@@ -53,6 +56,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
         _steps = steps.ToArray();
         _forceWatcher = forceWatcher;
         _options = options.Value;
+        _status = status;
         _timeProvider = timeProvider;
         _logger = logger;
     }
@@ -105,6 +109,11 @@ public sealed class ContinuousSyncWorker : BackgroundService
 
         _forceWatcher.ClearStaleRequestAtStartup();
 
+        // Lo que la pantalla necesita saber del arranque.
+        _status.Modo = "Continuous";
+        _status.CadenciaSegundos = _options.PollSeconds;
+        _status.PasosAutomaticos = _steps.Select(s => s.Name).ToArray();
+
         var fallosConsecutivos = 0;
 
         if (_options.RunOnStartup && !stoppingToken.IsCancellationRequested)
@@ -154,6 +163,7 @@ public sealed class ContinuousSyncWorker : BackgroundService
                     "Próximo intento en {Espera}s.",
                     fallosConsecutivos,
                     (int)_options.CalcularEspera(fallosConsecutivos).TotalSeconds);
+                RegistrarSondeo(fallosConsecutivos);
                 continue;
             }
 
@@ -163,14 +173,27 @@ public sealed class ContinuousSyncWorker : BackgroundService
                 // no llenar el log con un latido cada 20 segundos.
                 _logger.LogDebug("Sin tareas pendientes. No se abre sesión con SAP.");
                 fallosConsecutivos = 0;
+                RegistrarSondeo(fallosConsecutivos);
                 continue;
             }
+
+            RegistrarSondeo(fallosConsecutivos);
 
             fallosConsecutivos = await EjecutarCicloAsync(
                 SyncCycleTrigger.Scheduled, fallosConsecutivos, stoppingToken).ConfigureAwait(false);
         }
 
         _logger.LogInformation("Sincronización continua detenida.");
+    }
+
+    /// <summary>
+    /// Publica el sondeo y cuándo se espera el próximo, para la pantalla.
+    /// </summary>
+    private void RegistrarSondeo(int fallosConsecutivos)
+    {
+        var ahora = _timeProvider.GetLocalNow();
+        _status.RegistrarSondeo(ahora, ahora + _options.CalcularEspera(fallosConsecutivos));
+        _status.RegistrarFallosConsecutivos(fallosConsecutivos);
     }
 
     /// <summary>
@@ -203,6 +226,8 @@ public sealed class ContinuousSyncWorker : BackgroundService
         {
             var resultado = await _cycle.RunAsync(trigger, cancellationToken).ConfigureAwait(false);
             reloj.Stop();
+
+            _status.RegistrarCicloTerminado(_timeProvider.GetLocalNow(), resultado);
 
             if (resultado.RejectedByConcurrency)
             {

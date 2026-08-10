@@ -1,6 +1,7 @@
 using System.Reflection;
 using DinasWms.SapSync.Configuration;
 using DinasWms.SapSync.Middleware;
+using DinasWms.SapSync.Observability;
 using DinasWms.SapSync.ServiceLayer;
 using DinasWms.SapSync.Sql;
 using DinasWms.SapSync.Sync;
@@ -178,6 +179,14 @@ void Configurar(
         .Bind(configuration.GetSection(WebOptions.SectionName));
 
     services.AddSingleton(TimeProvider.System);
+
+    // Observabilidad. Se registra en TODOS los modos, no solo con la web: el
+    // buffer y el estado en vivo son baratos, y tenerlos siempre significa que
+    // el día que haga falta mirar qué pasó no hay que reiniciar con otro modo.
+    services.AddSingleton(new LogBuffer(capacity: 2000));
+    services.AddSingleton<SyncStatus>();
+    services.AddSingleton<LogBufferProvider>();
+    services.AddSingleton<ILoggerProvider>(sp => sp.GetRequiredService<LogBufferProvider>());
     services.AddSingleton<IServiceLayerSessionFactory, ServiceLayerSessionFactory>();
     services.AddSingleton<ISapSqlConnectionFactory, SapSqlConnectionFactory>();
     services.AddSingleton<IDocEntryResolver, DocEntryResolver>();
