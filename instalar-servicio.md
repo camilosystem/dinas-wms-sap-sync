@@ -148,3 +148,18 @@ usuario → *Iniciar sesión como servicio* → agregar la cuenta.)
 
 Desde este commit, `instalar-servicio.ps1` ya lo otorga durante la instalación,
 así que esto solo aplica a servicios instalados antes.
+
+---
+
+## Después de un cambio de código
+
+El servicio tiene el `.exe` bloqueado mientras corre, así que republicar exige
+detenerlo primero. Una consola como administrador:
+
+```
+.\actualizar-servicio.ps1
+```
+
+Detiene, publica, arranca y verifica que la pantalla responda. **`sap-sync.db`
+no se toca**: la configuración cambiada desde la pantalla y el historial de
+ciclos sobreviven a cada actualización.
