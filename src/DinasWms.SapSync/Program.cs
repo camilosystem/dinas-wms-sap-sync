@@ -9,6 +9,7 @@ using DinasWms.SapSync.Sync;
 using DinasWms.SapSync.Web;
 using DinasWms.SapSync.Workers;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -52,11 +53,22 @@ var modoDesconocido = false;
 
 IHost host;
 
+// Como servicio, el directorio actual del proceso es C:\Windows\System32. Si no
+// se fija el content root, el host busca appsettings.json ahí, no lo encuentra, y
+// arranca con la configuración por defecto EN SILENCIO — que es la peor forma de
+// fallar: el servicio queda "corriendo" apuntando a cualquier lado.
+var comoServicio = WindowsServiceHelpers.IsWindowsService();
+var raiz = comoServicio ? AppContext.BaseDirectory : Directory.GetCurrentDirectory();
+
 if (conWeb)
 {
     opcionesWeb.Validate();
 
-    var builder = WebApplication.CreateBuilder(args);
+    var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+    {
+        Args = args,
+        ContentRootPath = raiz,
+    });
     Configurar(builder.Configuration, builder.Services, builder.Logging);
 
     builder.Services.AddSingleton<WebSessions>();
@@ -75,7 +87,12 @@ if (conWeb)
 }
 else
 {
-    var builder = Host.CreateApplicationBuilder(args);
+    var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+    {
+        Args = args,
+        ContentRootPath = raiz,
+    });
+
     Configurar(builder.Configuration, builder.Services, builder.Logging);
 
     host = builder.Build();
@@ -200,6 +217,12 @@ void Configurar(
 
     services.AddOptions<WebOptions>()
         .Bind(configuration.GetSection(WebOptions.SectionName));
+
+    // Corre igual como consola y como Windows Service. Cuando el SCM lo arranca,
+    // esto además fija el content root en el directorio del ejecutable — sin
+    // eso un servicio busca appsettings.json en C:\Windows\System32 y arranca
+    // con la configuración por defecto, en silencio.
+    services.AddWindowsService(o => o.ServiceName = "DinasWmsSapSync");
 
     services.AddSingleton(TimeProvider.System);
 
