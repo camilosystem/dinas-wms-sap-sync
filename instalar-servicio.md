@@ -114,3 +114,37 @@ anterior, configura la recuperación automática, arranca y comprueba que la
 pantalla responda.
 
 Si se corre sin elevación se niega y no toca nada.
+
+---
+
+## Si el servicio queda en `Stopped` después de instalarlo
+
+Síntoma engañoso: `sc query` dice `STOPPED` con `SERVICE_EXIT_CODE 0` — o sea,
+sin ninguna pista. El motivo real está en el **Visor de eventos → Sistema**:
+
+```
+Id 7041: The DinasWmsSapSync service was unable to log on as
+         DINAS\Financial Advisor with the currently configured password...
+         Logon failure: the user has not been granted the requested logon type
+         at this computer.
+         This service account does not have the required user right
+         "Log on as a service."
+```
+
+**No es la contraseña.** Es un derecho de directiva local que la cuenta no
+tiene. `sc.exe create` no lo otorga solo.
+
+Se arregla sin reinstalar nada, en una consola como administrador:
+
+```
+.\arreglar-derecho-servicio.ps1
+```
+
+Otorga el derecho con `secedit` y arranca el servicio. Es idempotente: si el
+derecho ya estaba, lo dice y sigue.
+
+(A mano sería: `secpol.msc` → Directivas locales → Asignación de derechos de
+usuario → *Iniciar sesión como servicio* → agregar la cuenta.)
+
+Desde este commit, `instalar-servicio.ps1` ya lo otorga durante la instalación,
+así que esto solo aplica a servicios instalados antes.

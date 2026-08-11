@@ -53,6 +53,56 @@ if (Get-Service $servicio -ErrorAction SilentlyContinue) {
     Start-Sleep -Seconds 2
 }
 
+# --- El derecho "Iniciar sesion como servicio" --------------------------------
+#
+# Sin esto el servicio se crea bien, con la cuenta y la contrasena correctas, y
+# NO arranca: queda en Stopped con SERVICE_EXIT_CODE 0 —o sea, sin pista— y el
+# motivo real solo aparece en el Visor de eventos como
+#
+#   Id 7041: Logon failure: the user has not been granted the requested logon
+#            type at this computer. This service account does not have the
+#            required user right "Log on as a service."
+#
+# Es un derecho de directiva LOCAL, distinto de la contrasena. Se otorga acá para
+# que la instalacion no dependa de que alguien se acuerde de abrir secpol.msc.
+
+function Otorgar-DerechoDeServicio {
+    param([string]$Cuenta)
+
+    $sid = (New-Object System.Security.Principal.NTAccount($Cuenta)).Translate(
+        [System.Security.Principal.SecurityIdentifier]).Value
+
+    $tmp = Join-Path $env:TEMP "secpol-$([guid]::NewGuid().ToString('N')).cfg"
+
+    & secedit /export /cfg $tmp /areas USER_RIGHTS | Out-Null
+    $contenido = Get-Content $tmp
+
+    $linea = $contenido | Where-Object { $_ -match '^SeServiceLogonRight' }
+
+    if ($linea -and $linea -match [regex]::Escape($sid)) {
+        Write-Host "  el derecho ya estaba otorgado"
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    if ($linea) {
+        $nueva = $linea + ",*$sid"
+        $contenido = $contenido -replace [regex]::Escape($linea), $nueva
+    } else {
+        # Si la directiva no existe todavia, se crea con las cuentas de servicio
+        # de siempre mas la nuestra. Omitir las de sistema las dejaria sin el
+        # derecho y romperia otros servicios.
+        $contenido = $contenido -replace '^\[Privilege Rights\]',
+            "[Privilege Rights]`r`nSeServiceLogonRight = *S-1-5-19,*S-1-5-20,*$sid"
+    }
+
+    Set-Content $tmp $contenido -Encoding Unicode
+    & secedit /configure /db secedit.sdb /cfg $tmp /areas USER_RIGHTS | Out-Null
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+
+    Write-Host "  derecho 'Log on as a service' otorgado a $Cuenta"
+}
+
 # --- La cuenta ----------------------------------------------------------------
 #
 # NO se instala como LocalSystem. Las credenciales de SAP, SQL y del middleware
@@ -70,6 +120,10 @@ Write-Host "(es el perfil donde ya viven los user-secrets; no se mueve ningun se
 $clave = Read-Host "Contrasena de Windows de $cuenta" -AsSecureString
 $claveTexto = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
     [Runtime.InteropServices.Marshal]::SecureStringToBSTR($clave))
+
+Write-Host ""
+Write-Host "Otorgando 'Log on as a service'..."
+Otorgar-DerechoDeServicio -Cuenta $cuenta
 
 # --- Crear ---------------------------------------------------------------------
 
