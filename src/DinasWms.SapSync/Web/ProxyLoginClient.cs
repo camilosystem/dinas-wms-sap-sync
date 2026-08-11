@@ -49,17 +49,19 @@ public sealed class ProxyLoginClient
     private readonly MiddlewareOptions _options;
     private readonly ILogger<ProxyLoginClient> _logger;
 
+    /// <remarks>
+    /// El <see cref="HttpClient"/> viene inyectado y no se construye adentro: sin
+    /// eso, el chequeo de rol —lo único que separa a un usuario cualquiera de los
+    /// botones que escriben en SAP— no se puede probar sin un middleware vivo.
+    /// </remarks>
     public ProxyLoginClient(
+        HttpClient http,
         IOptions<MiddlewareOptions> options,
         ILogger<ProxyLoginClient> logger)
     {
+        _http = http;
         _options = options.Value;
         _logger = logger;
-        _http = new HttpClient
-        {
-            BaseAddress = new Uri(_options.BaseUrl),
-            Timeout = TimeSpan.FromSeconds(_options.TimeoutSeconds),
-        };
     }
 
     public async Task<ResultadoLogin> ValidarAsync(

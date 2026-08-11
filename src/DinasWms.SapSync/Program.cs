@@ -72,8 +72,18 @@ if (conWeb)
     Configurar(builder.Configuration, builder.Services, builder.Logging);
 
     builder.Services.AddSingleton<WebSessions>();
-    builder.Services.AddSingleton<ProxyLoginClient>();
     builder.Services.AddSingleton<ManualTriggerService>();
+
+    // El HttpClient del proxy de login se configura acá y se inyecta, para que
+    // el chequeo de rol sea probable sin un middleware vivo. NO comparte handler
+    // con el de Service Layer, que acepta cualquier certificado: por acá viajan
+    // credenciales de persona.
+    builder.Services.AddHttpClient<ProxyLoginClient>((sp, http) =>
+    {
+        var mw = sp.GetRequiredService<IOptions<MiddlewareOptions>>().Value;
+        http.BaseAddress = new Uri(mw.BaseUrl);
+        http.Timeout = TimeSpan.FromSeconds(mw.TimeoutSeconds);
+    });
 
     builder.WebHost.UseUrls(opcionesWeb.BuildUrls());
 

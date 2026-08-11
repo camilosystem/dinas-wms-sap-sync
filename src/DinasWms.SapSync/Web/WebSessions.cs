@@ -5,6 +5,19 @@ namespace DinasWms.SapSync.Web;
 /// <summary>Una sesión abierta en la interfaz de monitoreo.</summary>
 public sealed record WebSession(string Usuario, string Rol, DateTimeOffset Expira);
 
+/// <summary>Desenlace de autorizar un pedido.</summary>
+public enum Autorizacion
+{
+    /// <summary>Pasa.</summary>
+    Ok,
+
+    /// <summary>No hay token, no existe, o venció. → 401.</summary>
+    SinSesion,
+
+    /// <summary>Sesión válida pero sin el rol necesario. → 403.</summary>
+    RolInsuficiente,
+}
+
 /// <summary>
 /// Sesiones locales de la interfaz, en memoria.
 /// </summary>
@@ -73,6 +86,29 @@ public sealed class WebSessions
 
             return sesion;
         }
+    }
+
+    /// <summary>
+    /// La decisión de autorización completa: sesión válida Y rol suficiente.
+    /// </summary>
+    /// <remarks>
+    /// Vive acá y no dentro de los endpoints para que se pueda probar. Es lo
+    /// único que separa a cualquiera que llegue al puerto de los botones que
+    /// crean facturas reales; si se rompiera, ningún test de camino feliz se
+    /// daría cuenta.
+    /// </remarks>
+    public (Autorizacion Decision, WebSession? Sesion) Autorizar(string? token, string rolRequerido)
+    {
+        var sesion = Validar(token);
+
+        if (sesion is null)
+        {
+            return (Autorizacion.SinSesion, null);
+        }
+
+        return string.Equals(sesion.Rol, rolRequerido, StringComparison.OrdinalIgnoreCase)
+            ? (Autorizacion.Ok, sesion)
+            : (Autorizacion.RolInsuficiente, sesion);
     }
 
     public void Cerrar(string? token)

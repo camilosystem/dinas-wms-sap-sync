@@ -274,19 +274,17 @@ public static class ApiEndpoints
     /// </summary>
     private static IResult? Rechazar(HttpContext ctx, WebSessions sesiones)
     {
-        var sesion = sesiones.Validar(LeerToken(ctx));
+        // La decisión vive en WebSessions.Autorizar, que está cubierta por
+        // pruebas. Acá solo se traduce a códigos HTTP.
+        var (decision, _) = sesiones.Autorizar(LeerToken(ctx), ProxyLoginClient.RolRequerido);
 
-        if (sesion is null)
+        return decision switch
         {
-            return Results.Json(new { error = "Sesión inválida o vencida." }, statusCode: 401);
-        }
-
-        if (!string.Equals(sesion.Rol, ProxyLoginClient.RolRequerido, StringComparison.OrdinalIgnoreCase))
-        {
-            return Results.Json(new { error = "Se requiere rol ADMIN." }, statusCode: 403);
-        }
-
-        return null;
+            Autorizacion.Ok => null,
+            Autorizacion.RolInsuficiente =>
+                Results.Json(new { error = "Se requiere rol ADMIN." }, statusCode: 403),
+            _ => Results.Json(new { error = "Sesión inválida o vencida." }, statusCode: 401),
+        };
     }
 
     private static string? LeerToken(HttpContext ctx)
