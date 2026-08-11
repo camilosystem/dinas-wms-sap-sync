@@ -96,3 +96,21 @@ Aplicación**, con origen `DinasWmsSapSync`. El mensaje "Configuración inválid
 no se arranca" con una credencial faltante es el síntoma de que el servicio no
 está viendo los user-secrets: revisar con qué cuenta quedó configurado
 (`sc qc DinasWmsSapSync`, campo `SERVICE_START_NAME`).
+
+---
+
+## Atajo: el script
+
+En vez de tipear los `sc.exe` a mano —su sintaxis es quisquillosa, el espacio
+después de cada `=` es obligatorio— hay un script que hace todo y verifica:
+
+```
+.\instalar-servicio.ps1
+```
+
+Corre **como administrador**. Pide la contraseña de forma segura (no queda en el
+historial de la consola), detecta si ya hay un proceso suelto o un servicio
+anterior, configura la recuperación automática, arranca y comprueba que la
+pantalla responda.
+
+Si se corre sin elevación se niega y no toca nada.
