@@ -121,7 +121,8 @@ if (modoDesconocido)
     logger.LogCritical(
         "RunMode desconocido: '{Modo}'. Modos válidos: Continuous, Scheduler, SmokeTest, SqlProbe, " +
         "SlDiscovery, PaymentProbe, PaymentCancel, MiddlewareProbe, DraftInvoiceProbe, " +
-        "InvoiceProbe, DraftCreditNoteProbe, CreditNoteProbe. No se arranca nada — en " +
+        "InvoiceProbe, InvoiceDraftAcceptance, DraftCreditNoteProbe, CreditNoteProbe. " +
+        "No se arranca nada — en " +
         "particular, NO se " +
         "cae al scheduler, para que un binario desactualizado no termine corriendo ciclos " +
         "contra SAP cuando se le pidió otra cosa.",
@@ -425,6 +426,9 @@ void Configurar(
             break;
         case "invoiceprobe":
             services.AddHostedService<InvoiceProbeWorker>();
+            break;
+        case "invoicedraftacceptance":
+            services.AddHostedService<InvoiceDraftAcceptanceWorker>();
             break;
         case "draftcreditnoteprobe":
             services.AddHostedService<DraftCreditNoteProbeWorker>();

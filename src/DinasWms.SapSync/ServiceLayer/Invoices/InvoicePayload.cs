@@ -64,8 +64,46 @@ public sealed class InvoicePayload
     [JsonPropertyName("Comments")]
     public string? Comments { get; set; }
 
+    /// <summary>
+    /// Descuento de DOCUMENTO, en porcentaje, sobre el subtotal de las líneas.
+    /// </summary>
+    /// <remarks>
+    /// Verificado leyendo facturas reales de <c>SUPPORT_DINAS</c>:
+    ///
+    ///   · DocNum 6475 — <c>DiscountPercent 10.0</c>, Σ <c>LineTotal</c> 1709.33,
+    ///     <c>TotalDiscount</c> 170.93, <c>DocTotal</c> 1538.40.
+    ///   · DocNum 4988 — <c>DiscountPercent 4.249994</c>, Σ 2117.65,
+    ///     <c>TotalDiscount</c> 90.00, <c>DocTotal</c> 2027.65.
+    ///
+    /// O sea <c>DocTotal = Σ LineTotal − TotalDiscount</c>: se aplica sobre el
+    /// subtotal YA con los descuentos de línea, que es el orden que fija el
+    /// contrato. <c>TotalDiscount</c> lo deriva SAP y no se manda.
+    ///
+    /// <para>
+    /// La 4988 muestra hacia dónde cae el redondeo: ese porcentaje de seis
+    /// decimales contra un importe redondo delata que alguien cargó el IMPORTE
+    /// (90.00) y SAP calculó el porcentaje al revés. Nosotros hacemos lo
+    /// contrario —mandamos porcentaje y esperamos importe— así que el redondeo
+    /// aparece de nuestro lado.
+    /// </para>
+    /// </remarks>
+    [JsonPropertyName("DiscountPercent")]
+    public decimal? DiscountPercent { get; set; }
+
     [JsonPropertyName("DocumentLines")]
     public List<InvoiceLine> DocumentLines { get; set; } = [];
+
+    /// <summary>
+    /// Gastos adicionales del documento. Es donde va el FLETE.
+    /// </summary>
+    /// <remarks>
+    /// El flete se cobra como gasto adicional y no como línea de artículo. Existe
+    /// un artículo <c>FREIGHT</c> / <c>SERV-FREIGHT</c> en la base —el único
+    /// <c>itLabor</c> de la empresa— pero la empresa NO lo usa para esto; es otro
+    /// camino y no hay que seguirlo.
+    /// </remarks>
+    [JsonPropertyName("DocumentAdditionalExpenses")]
+    public List<InvoiceAdditionalExpense>? DocumentAdditionalExpenses { get; set; }
 
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 
@@ -164,6 +202,38 @@ public sealed class InvoiceLine
     /// </summary>
     [JsonPropertyName("DocumentLinesBinAllocations")]
     public List<InvoiceBinAllocation>? DocumentLinesBinAllocations { get; set; }
+}
+
+/// <summary>
+/// Un gasto adicional del documento. Complex type
+/// <c>DocumentAdditionalExpense</c>.
+/// </summary>
+/// <remarks>
+/// Ojo con los dos nombres, que NO son el mismo: acá el campo se llama
+/// <c>ExpenseCode</c>, pero la clave del catálogo <c>AdditionalExpenses</c> se
+/// llama <c>ExpensCode</c> —sin la "e"—, que es un typo viejo de SAP. Buscar por
+/// el nombre equivocado devuelve un error de propiedad inexistente.
+/// </remarks>
+public sealed class InvoiceAdditionalExpense
+{
+    /// <summary>
+    /// Código del gasto en los datos maestros de la empresa. Se resuelve por
+    /// NOMBRE contra <c>AdditionalExpenses</c>, nunca se escribe a mano.
+    /// </summary>
+    [JsonPropertyName("ExpenseCode")]
+    public int ExpenseCode { get; set; }
+
+    /// <summary>Importe del gasto. Se suma al total SIN descontar.</summary>
+    [JsonPropertyName("LineTotal")]
+    public decimal LineTotal { get; set; }
+
+    /// <summary>
+    /// Mismo criterio que en las líneas: el único código de impuesto de venta de
+    /// la empresa es <c>Exempt</c>, y se manda explícito porque SAP no tiene de
+    /// dónde derivarlo.
+    /// </summary>
+    [JsonPropertyName("TaxCode")]
+    public string? TaxCode { get; set; }
 }
 
 /// <summary>

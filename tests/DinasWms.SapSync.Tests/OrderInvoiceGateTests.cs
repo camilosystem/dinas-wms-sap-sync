@@ -8,21 +8,28 @@ using Xunit;
 namespace DinasWms.SapSync.Tests;
 
 /// <summary>
-/// El portón de los campos que el contrato v0.37.2 agregó y este lado todavía no
-/// traslada a SAP: <c>invoice_discount_pct</c> y <c>freight_amount</c>.
+/// El portón aritmético: rehacer las cuentas del documento y contrastarlas con
+/// <c>expected_doc_total</c> ANTES de escribir.
 /// </summary>
 /// <remarks>
-/// Lo que se fija acá no es una validación más, es el ORDEN: rechazar ANTES de
-/// escribir. Sin el portón la factura se crea igual —sin descuento y sin flete,
-/// por menos de lo autorizado— y el contraste contra <c>expected_doc_total</c>
-/// corre DESPUÉS del POST, así que solo alcanza a dejar una línea de error sobre
-/// un documento irreversible que ya existe y una tarea marcada como integrada.
+/// Reemplazó a un portón que nombraba campos sueltos (<c>invoice_discount_pct</c>,
+/// <c>freight_amount</c>), y es estrictamente más fuerte: no defiende contra dos
+/// campos, defiende contra la clase entera. Cualquier campo futuro que afecte al
+/// dinero y que el integrador ignore hace que el total calculado difiera del que
+/// espera el contrato, y la escritura se rechaza sola — sin que nadie tenga que
+/// acordarse de agregar una validación cuando el contrato crezca.
 ///
 /// <para>
-/// La sesión se pasa en <c>null!</c> a propósito: si algún día el rechazo dejara
-/// de ocurrir antes de tocar Service Layer, estos tests fallarían con
-/// <c>NullReferenceException</c> en vez de pasar. Esa es justamente la propiedad
-/// que interesa — que no haya ninguna llamada a SAP antes del rechazo.
+/// Es también la razón por la que <c>SapSyncJson</c> NO usa
+/// <c>UnmappedMemberHandling.Disallow</c>: eso convertiría cada campo aditivo del
+/// contrato —que se supone seguro— en una caída de la facturación. El chequeo
+/// aritmético cubre lo que importa sin romper con lo que no.
+/// </para>
+/// <para>
+/// La sesión va en <c>null!</c> a propósito: si el rechazo dejara de ocurrir antes
+/// de tocar Service Layer, estos tests fallarían con <c>NullReferenceException</c>
+/// en vez de pasar. Esa es la propiedad que interesa — que no haya ninguna
+/// llamada a SAP antes del rechazo.
 /// </para>
 /// </remarks>
 public class OrderInvoiceGateTests
@@ -32,10 +39,15 @@ public class OrderInvoiceGateTests
             Options.Create(new InvoicesOptions { WarehouseCode = "01" }),
             NullLogger<OrderInvoiceIntegrator>.Instance);
 
-    /// <summary>Una tarea por lo demás perfectamente integrable.</summary>
-    private static SapOrderInvoiceSyncTask TareaSana(
+    /// <summary>
+    /// Una línea de 6 x 45.50 sin descuento: 273.00 exactos. Sin asignaciones de
+    /// bin, para que no haga falta sesión hasta el anti-duplicado.
+    /// </summary>
+    private static SapOrderInvoiceSyncTask Tarea(
+        decimal? esperadoDocumento,
         decimal? descuentoDocumento = null,
-        decimal? flete = null) =>
+        decimal? flete = null,
+        decimal? esperadoLinea = null) =>
         new()
         {
             TaskId = 77,
@@ -44,7 +56,7 @@ public class OrderInvoiceGateTests
                 OrderUuid = "6f4df862-7a14-497f-87d5-51d28699d072",
                 ClientCode = "C100010",
                 InvoiceDate = "2026-08-12",
-                ExpectedDocTotal = 273.00m,
+                ExpectedDocTotal = esperadoDocumento,
                 InvoiceDiscountPct = descuentoDocumento,
                 FreightAmount = flete,
                 Lines =
@@ -55,70 +67,80 @@ public class OrderInvoiceGateTests
                         Quantity = 6m,
                         UnitPrice = 45.5m,
                         DiscountPct = 0m,
+                        ExpectedLineTotal = esperadoLinea,
                     },
                 ],
             },
         };
 
     [Fact]
-    public async Task ConDescuentoDeDocumento_seRechazaSinTocarSap()
+    public async Task SiElTotalNoCuadra_seRechazaSinTocarSap()
     {
+        // El caso general, y el que importa: el WMS contó 300.00 y las líneas dan
+        // 273.00. Algo que el WMS sí contó no está llegando a la factura. Da
+        // igual qué campo sea — incluso uno que todavía no exista.
         var resultado = await Integrador()
-            .IntegrarAsync(null!, TareaSana(descuentoDocumento: 10m), CancellationToken.None);
+            .IntegrarAsync(null!, Tarea(esperadoDocumento: 300.00m), CancellationToken.None);
 
         Assert.False(resultado.Integrada);
         Assert.Null(resultado.DocNum);
-        Assert.Contains("invoice_discount_pct", resultado.Error);
+        Assert.Contains("expected_doc_total", resultado.Error);
     }
 
     [Fact]
-    public async Task ConFlete_seRechazaSinTocarSap()
+    public async Task DescuentoDeDocumentoQueElContratoNoContemplo_seRechaza()
     {
+        // 273.00 con 10% da 245.70. Si el contrato dice 273.00, el descuento no
+        // está en el total esperado y alguien está contando distinto.
         var resultado = await Integrador()
-            .IntegrarAsync(null!, TareaSana(flete: 25.50m), CancellationToken.None);
+            .IntegrarAsync(
+                null!,
+                Tarea(esperadoDocumento: 273.00m, descuentoDocumento: 10m),
+                CancellationToken.None);
 
         Assert.False(resultado.Integrada);
-        Assert.Null(resultado.DocNum);
-        Assert.Contains("freight_amount", resultado.Error);
+        Assert.Contains("245.70", resultado.Error);
     }
 
     [Fact]
-    public async Task ConLosDos_elErrorNombraLosDos()
+    public async Task LineaCuyoExpectedLineTotalNoCuadra_seRechaza()
     {
-        // El middleware guarda este texto como error_detail. Que nombre los dos
-        // motivos importa: si solo dijera uno, resolver ese campo dejaría la
-        // tarea rebotando por el otro sin que nadie supiera por qué.
+        // Con una entrada por línea del pedido y el mismo item_code repetido a
+        // precios distintos, un reparto mal hecho se ve acá — antes de escribir.
         var resultado = await Integrador()
-            .IntegrarAsync(null!, TareaSana(descuentoDocumento: 10m, flete: 25.50m), CancellationToken.None);
+            .IntegrarAsync(
+                null!,
+                Tarea(esperadoDocumento: 273.00m, esperadoLinea: 250.00m),
+                CancellationToken.None);
 
         Assert.False(resultado.Integrada);
-        Assert.Contains("invoice_discount_pct", resultado.Error);
-        Assert.Contains("freight_amount", resultado.Error);
+        Assert.Contains("expected_line_total", resultado.Error);
     }
 
-    /// <remarks>
-    /// Al no rechazar, la ejecución sigue hasta la primera llamada a Service
-    /// Layer y revienta contra la sesión nula. Esa excepción ES el aserto: prueba
-    /// que el portón dejó pasar y que la ruta normal sigue intacta.
-    /// </remarks>
     [Fact]
-    public async Task SinLosCamposNuevos_elPortonNoSeMete()
+    public async Task ConDescuentoYTotalCoherente_elPortonDejaPasar()
+    {
+        // 273.00 − 27.30 = 245.70. Cuadra, así que la ejecución sigue hasta el
+        // anti-duplicado y revienta contra la sesión nula. Esa excepción ES el
+        // aserto: el portón cierra el paso a lo que no cuadra, no a lo que sí.
+        var integrador = Integrador();
+
+        await Assert.ThrowsAsync<NullReferenceException>(() =>
+            integrador.IntegrarAsync(
+                null!,
+                Tarea(esperadoDocumento: 245.70m, descuentoDocumento: 10m),
+                CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SinCamposNuevosYTotalCoherente_laRutaNormalSigueIntacta()
     {
         var integrador = Integrador();
 
         await Assert.ThrowsAsync<NullReferenceException>(() =>
-            integrador.IntegrarAsync(null!, TareaSana(), CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task ConDescuentoYFleteEnCero_elPortonNoSeMete()
-    {
-        // Cero y ausente son lo mismo: no hay nada que trasladar. Una orden sin
-        // descuento ni flete tiene que seguir facturándose como siempre — el
-        // portón cierra el paso a lo que no sabemos hacer, no a lo que sí.
-        var integrador = Integrador();
-
-        await Assert.ThrowsAsync<NullReferenceException>(() =>
-            integrador.IntegrarAsync(null!, TareaSana(0m, 0m), CancellationToken.None));
+            integrador.IntegrarAsync(
+                null!,
+                Tarea(esperadoDocumento: 273.00m, esperadoLinea: 273.00m),
+                CancellationToken.None));
     }
 }

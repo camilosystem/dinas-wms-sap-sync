@@ -43,11 +43,18 @@ public sealed class OrderInvoiceIntegrator
     /// anti-duplicado y muestra el payload. Es lo que usa el arnés manual para
     /// mirar qué se enviaría sin escribir en SAP.
     /// </param>
+    /// <param name="soloBorrador">
+    /// Manda el MISMO payload a <c>/Drafts</c> en vez de <c>/Invoices</c>, lo
+    /// verifica y lo borra. Es el ensayo que permite contrastar el
+    /// <c>DocTotal</c> que calcula SAP contra el <c>expected_doc_total</c> del
+    /// contrato sin asentar una factura irreversible.
+    /// </param>
     public async Task<OrderInvoiceOutcome> IntegrarAsync(
         ServiceLayerSession session,
         SapOrderInvoiceSyncTask tarea,
         CancellationToken cancellationToken,
-        bool simular = false)
+        bool simular = false,
+        bool soloBorrador = false)
     {
         var snapshot = tarea.OrderInvoice;
 
@@ -133,6 +140,42 @@ public sealed class OrderInvoiceIntegrator
                 aproximadas);
         }
 
+        // --- Flete: resolver el gasto por NOMBRE ------------------------------
+        // Igual que los bin_code contra BinLocations: el ExpenseCode es un dato
+        // maestro y sale de una consulta, no de un número escrito en el código.
+        int? codigoFlete = null;
+
+        if (snapshot.FreightAmount is > 0)
+        {
+            codigoFlete = await ResolverGastoAsync(
+                session, _options.FreightExpenseName, cancellationToken).ConfigureAwait(false);
+
+            if (codigoFlete is null)
+            {
+                return OrderInvoiceOutcome.Rechazada(
+                    $"la orden trae freight_amount={snapshot.FreightAmount} pero el gasto " +
+                    $"'{_options.FreightExpenseName}' no está definido en los datos maestros de la " +
+                    "empresa; sin él no hay contra qué cobrar el flete");
+            }
+        }
+
+        // --- El total, ANTES de escribir --------------------------------------
+        // Esta es la defensa estructural, y no es solo el chequeo del descuento y
+        // del flete: es la defensa contra la clase entera. Cualquier campo futuro
+        // que afecte al dinero y que este integrador ignore hace que el total
+        // calculado acá difiera de expected_doc_total, y la escritura se rechaza
+        // sola — sin necesidad de que nadie se acuerde de agregar una validación.
+        //
+        // Por eso NO se usa UnmappedMemberHandling.Disallow: eso convertiría cada
+        // campo aditivo del contrato, que se supone seguro, en una caída de la
+        // facturación. Este chequeo cubre lo que importa sin romper con lo que no.
+        var descuadre = VerificarTotalEsperado(snapshot, lineas);
+
+        if (descuadre is not null)
+        {
+            return OrderInvoiceOutcome.Rechazada(descuadre);
+        }
+
         // --- Anti-duplicado ---------------------------------------------------
         var yaExiste = await BuscarFacturaExistenteAsync(session, snapshot.OrderUuid!, cancellationToken)
             .ConfigureAwait(false);
@@ -150,7 +193,7 @@ public sealed class OrderInvoiceIntegrator
         }
 
         // --- Payload y POST ---------------------------------------------------
-        var payload = ArmarPayload(snapshot, lineas, almacen, binPorCodigo);
+        var payload = ArmarPayload(snapshot, lineas, almacen, binPorCodigo, codigoFlete, soloBorrador);
         var json = payload.ToJson();
 
         if (simular)
@@ -162,11 +205,14 @@ public sealed class OrderInvoiceIntegrator
             return OrderInvoiceOutcome.SimuladaOk();
         }
 
-        _logger.LogInformation("Tarea {TaskId}: enviando a SAP\n{Json}", tarea.TaskId, json);
+        var ruta = soloBorrador ? "Drafts" : "Invoices";
+
+        _logger.LogInformation(
+            "Tarea {TaskId}: enviando a SAP (POST /{Ruta})\n{Json}", tarea.TaskId, ruta, json);
 
         var (status, body) = await session
             .SendForStringAsync(
-                () => new HttpRequestMessage(HttpMethod.Post, "Invoices")
+                () => new HttpRequestMessage(HttpMethod.Post, ruta)
                 {
                     Content = new StringContent(json, Encoding.UTF8, "application/json"),
                 },
@@ -180,6 +226,34 @@ public sealed class OrderInvoiceIntegrator
 
         var docNum = LeerEntero(body, "DocNum");
         var docTotal = LeerDecimal(body, "DocTotal");
+
+        // --- Ensayo en borrador: contrastar y borrar ---------------------------
+        if (soloBorrador)
+        {
+            var docEntry = LeerEntero(body, "DocEntry");
+
+            // La respuesta literal ES el documento que SAP guardó: trae los
+            // LineNum que asignó y las asignaciones de bin como quedaron. Es lo
+            // único que se puede mirar, porque enseguida se borra.
+            _logger.LogInformation(
+                "=== RESPUESTA LITERAL DEL BORRADOR ({Codigo}), {Bytes:N0} bytes ===\n{Body}",
+                (int)status,
+                body.Length,
+                body);
+
+            _logger.LogInformation(
+                "ENSAYO: SAP calculó DocTotal {Real} y el contrato esperaba {Esperado} → {Veredicto}",
+                docTotal?.ToString("F2", CultureInfo.InvariantCulture) ?? "(ilegible)",
+                snapshot.ExpectedDocTotal?.ToString("F2", CultureInfo.InvariantCulture) ?? "(sin dato)",
+                docTotal is not null && docTotal == snapshot.ExpectedDocTotal ? "COINCIDE" : "NO COINCIDE");
+
+            var aviso = docEntry is null
+                ? "No se pudo leer el DocEntry del borrador: HAY QUE BORRARLO A MANO."
+                : await BorrarBorradorAsync(session, docEntry.Value, cancellationToken)
+                    .ConfigureAwait(false);
+
+            return OrderInvoiceOutcome.EnsayoTerminado(docEntry, docNum, docTotal, aviso);
+        }
 
         if (docNum is null)
         {
@@ -219,32 +293,15 @@ public sealed class OrderInvoiceIntegrator
     {
         var problemas = new List<string>();
 
-        // --- Portón: lo que este integrador todavía no sabe trasladar a SAP ---
-        //
-        // El contrato v0.37.2 agregó invoice_discount_pct y freight_amount, y
-        // este lado no los envía todavía. Sin este portón la factura se crearía
-        // igual, SIN el descuento ni el flete, por un monto MENOR que el
-        // autorizado — y como el contraste contra expected_doc_total corre
-        // DESPUÉS del POST, quedaría una factura irreversible en SAP, la tarea
-        // reportada como integrada, y una línea de error en un log.
-        //
-        // Rechazar es estrictamente mejor: la tarea vuelve con error, nadie
-        // facturó de menos, y queda visible en la cola. Se quita cuando cada
-        // campo esté modelado y verificado contra SAP, no antes.
-        if (snapshot.InvoiceDiscountPct is not null and not 0)
+        if (snapshot.InvoiceDiscountPct is < 0 or > 100)
         {
             problemas.Add(
-                $"trae invoice_discount_pct={snapshot.InvoiceDiscountPct} y el sincronizador " +
-                "todavía no traslada el descuento de documento a SAP; se rechaza para no facturar " +
-                "por un monto distinto del autorizado");
+                $"invoice_discount_pct={snapshot.InvoiceDiscountPct} fuera de rango (0 a 100)");
         }
 
-        if (snapshot.FreightAmount is not null and not 0)
+        if (snapshot.FreightAmount is < 0)
         {
-            problemas.Add(
-                $"trae freight_amount={snapshot.FreightAmount} y el sincronizador todavía no " +
-                "traslada el flete a SAP; se rechaza para no facturar por un monto distinto del " +
-                "autorizado");
+            problemas.Add($"freight_amount={snapshot.FreightAmount} es negativo");
         }
 
         if (string.IsNullOrWhiteSpace(snapshot.OrderUuid))
@@ -279,19 +336,199 @@ public sealed class OrderInvoiceIntegrator
                 problemas.Add(
                     $"línea {i} inusable: item='{l.ItemCode}' qty={l.Quantity} precio={l.UnitPrice} " +
                     $"desc={l.DiscountPct}");
+                continue;
+            }
+
+            // El expected_line_total del contrato contra la aritmética de la
+            // propia línea. Desde v0.37.2 hay UNA ENTRADA POR LÍNEA DEL PEDIDO y
+            // el mismo item_code puede aparecer dos veces a precios distintos —
+            // una promoción "lleve 10, pague 9" es exactamente eso. Si el reparto
+            // viene mal hecho, acá se ve, y se ve ANTES de escribir en SAP.
+            if (l.ExpectedLineTotal is not null &&
+                CalcularTotalLinea(l) != l.ExpectedLineTotal.Value)
+            {
+                problemas.Add(
+                    $"línea {i} ({l.ItemCode}): expected_line_total {l.ExpectedLineTotal} no " +
+                    $"coincide con {l.Quantity} x {l.UnitPrice} con {l.DiscountPct ?? 0}% de " +
+                    $"descuento, que da {CalcularTotalLinea(l)}");
             }
         }
 
         return problemas;
     }
 
+    /// <summary>
+    /// Total de una línea: cantidad por precio con el descuento aplicado,
+    /// redondeado a dos decimales al final.
+    /// </summary>
+    /// <remarks>
+    /// El descuento se aplica sobre el precio COMPLETO y el redondeo va una sola
+    /// vez, sobre el resultado. Redondear el precio con descuento antes de
+    /// multiplicar da otro número, y es lo que hace SAP: usa el precio con
+    /// descuento entero, no el <c>Price</c> de dos decimales que muestra.
+    /// </remarks>
+    private static decimal CalcularTotalLinea(SapOrderInvoiceLine linea) =>
+        decimal.Round(
+            linea.Quantity!.Value * linea.UnitPrice!.Value * (1m - (linea.DiscountPct ?? 0m) / 100m),
+            2,
+            MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// Rehace la aritmética del documento y la contrasta con
+    /// <c>expected_doc_total</c>. Devuelve el motivo del rechazo, o null si cuadra.
+    /// </summary>
+    /// <remarks>
+    /// El orden es el que fija el contrato y que las facturas reales confirman:
+    /// líneas con su descuento → descuento de documento sobre ese subtotal →
+    /// flete sumado SIN descontar.
+    /// </remarks>
+    private string? VerificarTotalEsperado(
+        SapOrderInvoiceSnapshot snapshot,
+        List<SapOrderInvoiceLine> lineas)
+    {
+        if (snapshot.ExpectedDocTotal is null)
+        {
+            // Sin referencia no hay nada contra qué contrastar. No se inventa una.
+            _logger.LogWarning(
+                "La tarea no trae expected_doc_total: se factura sin poder verificar el total " +
+                "antes de escribir.");
+            return null;
+        }
+
+        var subtotal = lineas.Sum(CalcularTotalLinea);
+
+        var descuento = snapshot.InvoiceDiscountPct is > 0
+            ? decimal.Round(
+                subtotal * snapshot.InvoiceDiscountPct.Value / 100m, 2, MidpointRounding.AwayFromZero)
+            : 0m;
+
+        var flete = snapshot.FreightAmount ?? 0m;
+        var total = decimal.Round(subtotal - descuento + flete, 2, MidpointRounding.AwayFromZero);
+
+        if (total == snapshot.ExpectedDocTotal.Value)
+        {
+            return null;
+        }
+
+        // Los montos van formateados como dinero: este texto termina en el
+        // error_detail de la tarea y lo lee alguien que audita, no un programa.
+        static string Money(decimal v) => v.ToString("F2", CultureInfo.InvariantCulture);
+
+        return
+            $"el total calculado acá no coincide con expected_doc_total: líneas {Money(subtotal)}, " +
+            $"descuento de documento {Money(descuento)} ({snapshot.InvoiceDiscountPct ?? 0}%), " +
+            $"flete {Money(flete)} → {Money(total)}, y el contrato espera " +
+            $"{Money(snapshot.ExpectedDocTotal.Value)}. No se factura: la diferencia significa que " +
+            "este integrador no está trasladando algo que el WMS sí contó";
+    }
+
+    /// <summary>
+    /// Resuelve el código de un gasto adicional por su NOMBRE, contra los datos
+    /// maestros de la empresa. Devuelve null si no está definido.
+    /// </summary>
+    /// <remarks>
+    /// Ojo con los dos nombres: en el catálogo la clave es <c>ExpensCode</c> —sin
+    /// la "e", typo viejo de SAP— y en la línea del documento el campo es
+    /// <c>ExpenseCode</c>.
+    /// </remarks>
+    private async Task<int?> ResolverGastoAsync(
+        ServiceLayerSession session,
+        string nombre,
+        CancellationToken cancellationToken)
+    {
+        var filtro = $"Name eq '{nombre.Replace("'", "''")}'";
+        var ruta = $"AdditionalExpenses?$filter={Uri.EscapeDataString(filtro)}&$select=ExpensCode,Name";
+
+        var (status, body) = await session
+            .SendForStringAsync(() => new HttpRequestMessage(HttpMethod.Get, ruta), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (status != HttpStatusCode.OK)
+        {
+            throw new ServiceLayerException(
+                $"No se pudo resolver el gasto adicional '{nombre}' ({(int)status}).", status, body);
+        }
+
+        using var doc = JsonDocument.Parse(body);
+
+        if (!doc.RootElement.TryGetProperty("value", out var value) ||
+            value.ValueKind != JsonValueKind.Array ||
+            value.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        if (!value[0].TryGetProperty("ExpensCode", out var codigo) ||
+            !codigo.TryGetInt32(out var n))
+        {
+            return null;
+        }
+
+        _logger.LogInformation("Gasto adicional '{Nombre}' → ExpenseCode {Codigo}.", nombre, n);
+        return n;
+    }
+
+    /// <summary>
+    /// Borra el borrador del ensayo y verifica que se haya ido. Devuelve una
+    /// advertencia si algo quedó colgado, o null si salió limpio.
+    /// </summary>
+    private async Task<string?> BorrarBorradorAsync(
+        ServiceLayerSession session,
+        int docEntry,
+        CancellationToken cancellationToken)
+    {
+        var (status, body) = await session
+            .SendForStringAsync(
+                () => new HttpRequestMessage(HttpMethod.Delete, $"Drafts({docEntry})"),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (status is not (HttpStatusCode.NoContent or HttpStatusCode.OK))
+        {
+            return $"FALLÓ el borrado del borrador {docEntry} ({(int)status}). " +
+                   $"HAY QUE BORRARLO A MANO: {body}";
+        }
+
+        var (statusVerif, _) = await session
+            .SendForStringAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, $"Drafts({docEntry})"),
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (statusVerif != HttpStatusCode.NotFound)
+        {
+            return $"El DELETE respondió bien pero el borrador {docEntry} sigue respondiendo " +
+                   $"({(int)statusVerif}).";
+        }
+
+        _logger.LogInformation("Borrador {DocEntry} borrado y verificado (404).", docEntry);
+        return null;
+    }
+
     private static InvoicePayload ArmarPayload(
         SapOrderInvoiceSnapshot snapshot,
         List<SapOrderInvoiceLine> lineas,
         string almacen,
-        Dictionary<string, int> binPorCodigo) =>
+        Dictionary<string, int> binPorCodigo,
+        int? codigoFlete,
+        bool soloBorrador) =>
         new()
         {
+            DocObjectCode = soloBorrador ? "oInvoices" : null,
+            DiscountPercent = snapshot.InvoiceDiscountPct is > 0
+                ? snapshot.InvoiceDiscountPct
+                : null,
+            DocumentAdditionalExpenses = codigoFlete is null
+                ? null
+                :
+                [
+                    new InvoiceAdditionalExpense
+                    {
+                        ExpenseCode = codigoFlete.Value,
+                        LineTotal = snapshot.FreightAmount!.Value,
+                        TaxCode = "Exempt",
+                    },
+                ],
             CardCode = snapshot.ClientCode!,
             DocDate = snapshot.InvoiceDate!.Length >= 10
                 ? snapshot.InvoiceDate[..10]
@@ -452,8 +689,25 @@ public sealed record OrderInvoiceOutcome(
     string? Error,
     bool YaExistiaEnSap = false,
     bool CreadaSinPoderLeerNumero = false,
-    bool Simulada = false)
+    bool Simulada = false,
+    bool EnsayoEnBorrador = false,
+    int? DocEntry = null,
+    decimal? DocTotal = null,
+    string? Advertencia = null)
 {
+    /// <summary>
+    /// El ensayo en borrador terminó. NO hay factura asentada: sirve para saber
+    /// que el payload es válido y que la aritmética de SAP coincide con la del
+    /// contrato, no para cerrar una tarea.
+    /// </summary>
+    public static OrderInvoiceOutcome EnsayoTerminado(
+        int? docEntry, int? docNum, decimal? docTotal, string? advertencia) =>
+        new(false, docNum, null,
+            EnsayoEnBorrador: true,
+            DocEntry: docEntry,
+            DocTotal: docTotal,
+            Advertencia: advertencia);
+
     public static OrderInvoiceOutcome SimuladaOk() => new(false, null, null, false, false, true);
 
     public static OrderInvoiceOutcome Creada(int docNum) => new(true, docNum, null);
