@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Reflection;
 using DinasWms.SapSync.Configuration;
 using DinasWms.SapSync.Middleware;
@@ -51,6 +52,10 @@ var conWeb = esOperativo && opcionesWeb.Enabled;
 
 var modoDesconocido = false;
 
+// Dónde terminó escuchando la web. Se resuelve antes de construir el host y se
+// registra después, cuando ya hay logger — mismo patrón que modoDesconocido.
+BindAddressPlan? planWeb = null;
+
 IHost host;
 
 // Como servicio, el directorio actual del proceso es C:\Windows\System32. Si no
@@ -63,6 +68,13 @@ var raiz = comoServicio ? AppContext.BaseDirectory : Directory.GetCurrentDirecto
 if (conWeb)
 {
     opcionesWeb.Validate();
+
+    // Cuando el SCM arranca el servicio al encender la máquina, la IP de
+    // Tailscale puede no existir todavía. Bindear una dirección ausente mata el
+    // proceso con SocketException 10049 — y con el proceso se va la
+    // facturación, que no tiene nada que ver con el monitor. Se espera a que
+    // aparezca y, si no aparece, se arranca con lo que haya.
+    planWeb = await new BindAddressPlanner().ResolverAsync(opcionesWeb);
 
     var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     {
@@ -85,7 +97,7 @@ if (conWeb)
         http.Timeout = TimeSpan.FromSeconds(mw.TimeoutSeconds);
     });
 
-    builder.WebHost.UseUrls(opcionesWeb.BuildUrls());
+    builder.WebHost.UseUrls(opcionesWeb.BuildUrls(planWeb.Direcciones));
 
     var app = builder.Build();
 
@@ -97,15 +109,7 @@ if (conWeb)
 }
 else
 {
-    var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
-    {
-        Args = args,
-        ContentRootPath = raiz,
-    });
-
-    Configurar(builder.Configuration, builder.Services, builder.Logging);
-
-    host = builder.Build();
+    host = ConstruirHeadless();
 }
 
 var logger = host.Services
@@ -166,17 +170,126 @@ catch (Exception ex)
 
 logger.LogInformation("Modo de ejecución: {Modo}", runMode);
 
-if (conWeb)
+if (conWeb && planWeb is not null)
 {
-    logger.LogInformation(
-        "Interfaz de monitoreo escuchando en: {Urls}", string.Join(", ", opcionesWeb.BuildUrls()));
+    if (planWeb.Ausentes.Length > 0)
+    {
+        logger.LogWarning(
+            "Estas direcciones configuradas no aparecieron tras esperar {Esperado:0}s: {Ausentes}. " +
+            "La interfaz de monitoreo arranca solo en {Urls}{Aviso}. El worker NO se detiene por " +
+            "esto: facturar es la función del negocio, monitorear es la comodidad.",
+            planWeb.Esperado.TotalSeconds,
+            string.Join(", ", planWeb.Ausentes),
+            string.Join(", ", opcionesWeb.BuildUrls(planWeb.Direcciones)),
+            planWeb.CayoALoopback ? " (solo loopback: no se llega desde Tailscale)" : string.Empty);
+    }
+    else
+    {
+        logger.LogInformation(
+            "Interfaz de monitoreo escuchando en: {Urls}",
+            string.Join(", ", opcionesWeb.BuildUrls(planWeb.Direcciones)));
+    }
 }
 
-await host.RunAsync();
+// StartAsync + WaitForShutdownAsync en vez de RunAsync, que parece lo mismo y
+// no lo es: RunAsync DESECHA el host en su finally, así que cuando el bind
+// falla el contenedor —y con él el logger y todos los proveedores— ya está
+// muerto antes de que se pueda escribir una sola línea explicando por qué. Acá
+// el ciclo de vida se maneja a mano para poder avisar y después degradar.
+try
+{
+    await host.StartAsync();
+}
+catch (Exception ex) when (conWeb && EsFalloAlBindear(ex))
+{
+    // Última instancia. La espera de BindAddressPlanner cubre la dirección que
+    // todavía no existe; esto cubre lo que ninguna espera arregla — el puerto
+    // ocupado por un proceso viejo (10048), que es justamente lo que pasa
+    // cuando el servicio crashea y el SCM lo reinicia enseguida. Sin esta
+    // rama el worker moriría en bucle y la facturación quedaría caída
+    // indefinidamente por culpa del monitor, que es la inversión de
+    // prioridades que este arreglo existe para prohibir.
+    logger.LogCritical(
+        ex,
+        "Kestrel no pudo bindear ninguna dirección, así que NO hay interfaz de monitoreo. " +
+        "El sincronizador arranca igual, sin pantalla: facturar no depende del monitor. " +
+        "Revisar si otro proceso tiene tomado el puerto {Puerto}.",
+        opcionesWeb.Port);
+
+    // El worker arranca ANTES que Kestrel, así que a esta altura ya está
+    // corriendo. Hay que detenerlo de verdad antes de construir el segundo
+    // host: dos bucles vivos contra la misma cola sería peor que no tener
+    // ninguno. El portón (SyncCycleGate) es por proceso y no protege de esto.
+    try
+    {
+        await host.StopAsync();
+    }
+    catch (Exception exParada)
+    {
+        logger.LogWarning(exParada, "Fallo al detener el host a medio arrancar. Se sigue igual.");
+    }
+
+    await DesecharAsync(host);
+
+    using var headless = ConstruirHeadless();
+    await headless.RunAsync();
+
+    return Environment.ExitCode;
+}
+
+await host.WaitForShutdownAsync();
+await DesecharAsync(host);
 
 return Environment.ExitCode;
 
+// RunAsync hacía esto solo; al manejar el arranque a mano hay que desecharlo
+// a mano también, o el archivo SQLite y el puerto quedan tomados.
+static async ValueTask DesecharAsync(IHost elHost)
+{
+    if (elHost is IAsyncDisposable asincrono)
+    {
+        await asincrono.DisposeAsync();
+    }
+    else
+    {
+        elHost.Dispose();
+    }
+}
+
+// Kestrel envuelve el fallo de bind en IOException; el detalle real
+// (10049 dirección inexistente, 10048 puerto ocupado) viaja adentro.
+static bool EsFalloAlBindear(Exception excepcion)
+{
+    for (var actual = excepcion; actual is not null; actual = actual.InnerException)
+    {
+        if (actual is SocketException
+            || actual.GetType().Name == "AddressInUseException"
+            || (actual is IOException && actual.Message.Contains(
+                    "Failed to bind", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // ---------------------------------------------------------------------------
+
+// Host sin servidor web: el worker y nada más. Lo usan los modos de
+// diagnóstico y, sobre todo, la caída elegante cuando la web no puede bindear.
+IHost ConstruirHeadless()
+{
+    var builder = Host.CreateApplicationBuilder(new HostApplicationBuilderSettings
+    {
+        Args = args,
+        ContentRootPath = raiz,
+    });
+
+    Configurar(builder.Configuration, builder.Services, builder.Logging);
+
+    return builder.Build();
+}
 
 // Registro compartido por las dos ramas. Recibe las tres superficies que ambos
 // builders exponen igual, así no hay dos listas de servicios que mantener.

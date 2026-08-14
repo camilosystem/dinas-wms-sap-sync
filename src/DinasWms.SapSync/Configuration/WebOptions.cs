@@ -52,6 +52,20 @@ public sealed class WebOptions
     /// </remarks>
     public string[] BindAddresses { get; set; } = [];
 
+    /// <summary>
+    /// Cuánto esperar, al arrancar, a que aparezcan las direcciones configuradas
+    /// que todavía no existen en la máquina.
+    /// </summary>
+    /// <remarks>
+    /// La IP de Tailscale no está asignada en el instante en que el SCM arranca
+    /// el servicio al encender la máquina, y bindear una dirección ausente mata
+    /// el proceso. 30 segundos cubre con holgura lo medido (Tailscale tardó unos
+    /// dos minutos en el peor caso observado, pero el reintento del SCM cubre el
+    /// resto). En 0 no se espera: se mira una vez y se arranca con lo que haya.
+    /// Ver <see cref="BindAddressPlanner"/>.
+    /// </remarks>
+    public int WaitForAddressSeconds { get; set; } = 30;
+
     public void Validate()
     {
         if (BindAddresses.Length == 0)
@@ -67,6 +81,16 @@ public sealed class WebOptions
         {
             throw new InvalidOperationException(
                 $"{SectionName}:{nameof(Port)} debe estar entre 1 y 65535 (actual: {Port}).");
+        }
+
+        // El tope existe para que un valor absurdo no deje el arranque colgado:
+        // esperar es para cubrir una carrera de segundos, no para tapar una red
+        // que no va a levantar nunca.
+        if (WaitForAddressSeconds is < 0 or > 300)
+        {
+            throw new InvalidOperationException(
+                $"{SectionName}:{nameof(WaitForAddressSeconds)} debe estar entre 0 y 300 " +
+                $"(actual: {WaitForAddressSeconds}).");
         }
 
         foreach (var direccion in BindAddresses)
@@ -88,7 +112,16 @@ public sealed class WebOptions
         }
     }
 
-    /// <summary>URLs completas para Kestrel.</summary>
-    public string[] BuildUrls() =>
-        BindAddresses.Select(d => $"http://{d}:{Port}").ToArray();
+    /// <summary>URLs completas para Kestrel, con todo lo configurado.</summary>
+    public string[] BuildUrls() => BuildUrls(BindAddresses);
+
+    /// <summary>
+    /// URLs completas para Kestrel con las direcciones que se hayan resuelto.
+    /// </summary>
+    /// <remarks>
+    /// Se pasa la lista por fuera porque lo configurado y lo que existe en la
+    /// máquina al arrancar no siempre coinciden — ver <see cref="BindAddressPlanner"/>.
+    /// </remarks>
+    public string[] BuildUrls(IEnumerable<string> direcciones) =>
+        direcciones.Select(d => $"http://{d}:{Port}").ToArray();
 }

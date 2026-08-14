@@ -91,6 +91,19 @@ public class WebOptionsTests
             o.BuildUrls());
     }
 
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(301)]
+    public void EsperaDeDireccionFueraDeRango_noArranca(int segundos)
+    {
+        // Esperar sirve para cubrir una carrera de segundos. Un valor absurdo
+        // dejaría el arranque colgado, que no es mejor que fallar.
+        var o = new WebOptions { WaitForAddressSeconds = segundos };
+
+        var ex = Assert.Throws<InvalidOperationException>(o.Validate);
+        Assert.Contains("WaitForAddressSeconds", ex.Message);
+    }
+
     [Fact]
     public void DeshabilitadaPorDefecto()
     {
