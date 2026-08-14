@@ -95,6 +95,16 @@ public sealed class InvoiceDraftAcceptanceWorker : BackgroundService
         var cliente = _configuration["Probe:CardCode"] ?? "C100010";
         var item = _configuration["Probe:ItemCode"] ?? "GDD1108";
 
+        // Bins OPCIONALES, uno DISTINTO por línea. Es el último eslabón sin
+        // verificar de la cadena que escribe: las asignaciones se enganchan a la
+        // línea por BaseLineNumber, y con el mismo item_code en dos entradas, si
+        // SAP las mezclara, la mercancía saldría del bin equivocado. No es un
+        // error de plata: es de inventario físico, y esos se descubren contando.
+        // Dos bins distintos hacen que una mezcla sea visible; con el mismo bin
+        // en las dos líneas, un cruce pasaría desapercibido.
+        var bin1 = _configuration["Probe:BinCode1"];
+        var bin2 = _configuration["Probe:BinCode2"];
+
         // --- Los números, calculados acá con la misma aritmética del contrato --
         // Se calculan y NO se copian: si el integrador y este arnés difirieran,
         // el portón aritmético rechazaría antes de llegar a SAP, que también es
@@ -163,6 +173,7 @@ public sealed class InvoiceDraftAcceptanceWorker : BackgroundService
                         UnitPrice = precio,
                         DiscountPct = descuentoLinea,
                         ExpectedLineTotal = linea1,
+                        BinAllocations = Bins(bin1, 7m),
                     },
                     new SapOrderInvoiceLine
                     {
@@ -171,6 +182,7 @@ public sealed class InvoiceDraftAcceptanceWorker : BackgroundService
                         UnitPrice = precio,
                         DiscountPct = 0m,
                         ExpectedLineTotal = linea2,
+                        BinAllocations = Bins(bin2, 3m),
                     },
                 ],
             },
@@ -222,6 +234,11 @@ public sealed class InvoiceDraftAcceptanceWorker : BackgroundService
             total.ToString("F2", CultureInfo.InvariantCulture),
             (resultado.DocTotal.Value - total).ToString("F2", CultureInfo.InvariantCulture));
     }
+
+    private static List<SapOrderInvoiceBinAllocation>? Bins(string? binCode, decimal cantidad) =>
+        string.IsNullOrWhiteSpace(binCode)
+            ? null
+            : [new SapOrderInvoiceBinAllocation { BinCode = binCode, Quantity = cantidad }];
 
     private static decimal Redondear(decimal v) =>
         decimal.Round(v, 2, MidpointRounding.AwayFromZero);

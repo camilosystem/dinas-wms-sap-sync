@@ -41,6 +41,32 @@ public sealed class InvoicesOptions
     /// </remarks>
     public string FreightExpenseName { get; set; } = "Domestic Freight";
 
+    /// <summary>
+    /// Código de impuesto con el que se cobra el flete.
+    /// </summary>
+    /// <remarks>
+    /// <b>Arranca VACÍO a propósito y esto NO es un descuido.</b> Cómo tributa el
+    /// flete es una decisión fiscal de la empresa y el sincronizador no la toma:
+    /// la transporta. Un valor por defecto escrito en el código sería esa
+    /// decisión tomada por omisión y sin que nadie se entere.
+    ///
+    /// <para>
+    /// Se intentó resolverlo como el <c>ExpenseCode</c> —leyéndolo de la
+    /// definición del gasto— y NO se puede: "Domestic Freight" tiene
+    /// <c>TaxLiable tNO</c> y los dos grupos de IVA vacíos, así que no lleva
+    /// código propio. Y omitirlo tampoco es opción: SAP rechaza el documento con
+    /// <c>-5002 "Tax code not defined for freight [INV3.TaxCode]"</c>. Alguien
+    /// tiene que decidirlo, y por eso vive acá, a la vista en
+    /// <c>appsettings.json</c>, y no enterrado en el armado del payload.
+    /// </para>
+    /// <para>
+    /// En esta empresa hay UN solo código de impuesto de venta —<c>Exempt</c>,
+    /// tasa 0, activo— así que hoy no hay entre qué elegir; pero el día que haya
+    /// dos, la decisión tiene que seguir siendo de quien corresponde.
+    /// </para>
+    /// </remarks>
+    public string FreightTaxCode { get; set; } = "";
+
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(WarehouseCode))

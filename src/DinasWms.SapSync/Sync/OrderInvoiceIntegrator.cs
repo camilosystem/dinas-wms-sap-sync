@@ -147,6 +147,18 @@ public sealed class OrderInvoiceIntegrator
 
         if (snapshot.FreightAmount is > 0)
         {
+            // Sin código de impuesto no se factura el flete. SAP lo exige
+            // (-5002) y la definición del gasto no lo trae, así que si nadie lo
+            // configuró es que nadie lo decidió — y no se decide acá.
+            if (string.IsNullOrWhiteSpace(_options.FreightTaxCode))
+            {
+                return OrderInvoiceOutcome.Rechazada(
+                    $"la orden trae freight_amount={snapshot.FreightAmount} pero " +
+                    $"{InvoicesOptions.SectionName}:{nameof(InvoicesOptions.FreightTaxCode)} está " +
+                    "vacío; cómo tributa el flete es una decisión de la empresa y no se elige por " +
+                    "omisión");
+            }
+
             codigoFlete = await ResolverGastoAsync(
                 session, _options.FreightExpenseName, cancellationToken).ConfigureAwait(false);
 
@@ -193,7 +205,8 @@ public sealed class OrderInvoiceIntegrator
         }
 
         // --- Payload y POST ---------------------------------------------------
-        var payload = ArmarPayload(snapshot, lineas, almacen, binPorCodigo, codigoFlete, soloBorrador);
+        var payload = ArmarPayload(
+            snapshot, lineas, almacen, binPorCodigo, codigoFlete, _options.FreightTaxCode, soloBorrador);
         var json = payload.ToJson();
 
         if (simular)
@@ -511,6 +524,7 @@ public sealed class OrderInvoiceIntegrator
         string almacen,
         Dictionary<string, int> binPorCodigo,
         int? codigoFlete,
+        string taxCodeFlete,
         bool soloBorrador) =>
         new()
         {
@@ -522,11 +536,17 @@ public sealed class OrderInvoiceIntegrator
                 ? null
                 :
                 [
+                    // El TaxCode viene de configuración y NO de una constante acá:
+                    // es una decisión fiscal de la empresa. Se intentó leerlo de
+                    // la definición del gasto, como se hizo con el ExpenseCode, y
+                    // no se puede —"Domestic Freight" tiene TaxLiable tNO y los
+                    // grupos de IVA vacíos— y omitirlo tampoco, porque SAP rechaza
+                    // el documento con -5002 "Tax code not defined for freight".
                     new InvoiceAdditionalExpense
                     {
                         ExpenseCode = codigoFlete.Value,
                         LineTotal = snapshot.FreightAmount!.Value,
-                        TaxCode = "Exempt",
+                        TaxCode = taxCodeFlete,
                     },
                 ],
             CardCode = snapshot.ClientCode!,
