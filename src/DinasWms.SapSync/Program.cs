@@ -376,6 +376,12 @@ void Configurar(
 
     services.AddSingleton<OrderInvoiceIntegrator>();
 
+    // Registrado siempre, igual que el de facturas, aunque hoy solo lo use el
+    // arnés manual: es lógica de negocio compartida, no un modo de ejecución.
+    // Que exista acá NO lo vuelve automático — eso lo decide la lista de
+    // IDocumentSyncStep de abajo.
+    services.AddSingleton<CreditNoteIntegrator>();
+
     // Tipos de documento que corren AUTOMÁTICOS. Las notas de crédito NO están
     // acá a propósito: se disparan a mano con --RunMode=CreditNoteProbe, por
     // decisión de negocio. Agregar una aquí es lo que la vuelve automática.
