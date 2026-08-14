@@ -209,8 +209,52 @@ public sealed class SapOrderInvoiceSnapshot
     [JsonPropertyName("invoice_date")]
     public string? InvoiceDate { get; set; }
 
+    /// <summary>
+    /// UNA ENTRADA POR LÍNEA DEL PEDIDO, no por ítem (contrato v0.37.2).
+    /// </summary>
+    /// <remarks>
+    /// El <c>item_code</c> PUEDE REPETIRSE entre entradas y <b>no se agrupa por
+    /// ese campo en ningún punto</b> de la construcción de la factura. El
+    /// middleware agrupaba, y una promoción "lleve 10, pague 9" del mismo ítem
+    /// terminaba facturando las 11 unidades a precio de lista.
+    ///
+    /// <para>
+    /// El orden del array es el orden de las líneas, y el índice de cada entrada
+    /// es el <c>BaseLineNumber</c> de la línea de la factura y de sus
+    /// asignaciones de bin.
+    /// </para>
+    /// </remarks>
     [JsonPropertyName("lines")]
     public List<SapOrderInvoiceLine>? Lines { get; set; }
+
+    /// <summary>
+    /// Descuento de DOCUMENTO, en porcentaje, sobre el subtotal de las líneas.
+    /// </summary>
+    /// <remarks>
+    /// Verificado contra facturas reales de <c>SUPPORT_DINAS</c> (DocNum 6475 y
+    /// 4988): en SAP lo lleva <c>DiscountPercent</c> en la cabecera, SAP deriva
+    /// <c>TotalDiscount</c>, y <c>DocTotal = Σ LineTotal − TotalDiscount</c>. El
+    /// porcentaje se guarda con 6 decimales — en la 4988 vale 4.249994 porque
+    /// alguien cargó un IMPORTE de 90.00 y SAP calculó el porcentaje al revés.
+    /// </remarks>
+    [JsonPropertyName("invoice_discount_pct")]
+    public decimal? InvoiceDiscountPct { get; set; }
+
+    /// <summary>
+    /// Flete, como IMPORTE. Se suma sin descontar, después del descuento de
+    /// documento.
+    /// </summary>
+    /// <remarks>
+    /// El contrato solo transporta el monto y deja a este lado la correspondencia
+    /// con SAP. Esa correspondencia TODAVÍA NO ESTÁ RESUELTA: en
+    /// <c>SUPPORT_DINAS</c> no hay una sola factura que lleve flete (340
+    /// muestreadas sobre 7990, ninguna con <c>DocumentAdditionalExpenses</c> ni
+    /// con una línea del artículo <c>FREIGHT</c>), así que no hay documento real
+    /// del cual copiar la forma. Mientras no lo haya, las tareas que traigan
+    /// flete se rechazan.
+    /// </remarks>
+    [JsonPropertyName("freight_amount")]
+    public decimal? FreightAmount { get; set; }
 
     /// <summary>
     /// Total que el WMS espera de esta factura. Es la única referencia
@@ -218,6 +262,11 @@ public sealed class SapOrderInvoiceSnapshot
     /// SAP: si difieren, el documento no dice lo que el WMS autorizó, y eso se
     /// reporta — no se corrige por cuenta propia.
     /// </summary>
+    /// <remarks>
+    /// Desde v0.37.2 <b>ya no es la suma de las líneas</b>: incluye el descuento
+    /// de documento y el flete, en el orden líneas con su descuento → descuento
+    /// de documento sobre el subtotal → flete sumado sin descontar.
+    /// </remarks>
     [JsonPropertyName("expected_doc_total")]
     public decimal? ExpectedDocTotal { get; set; }
 }

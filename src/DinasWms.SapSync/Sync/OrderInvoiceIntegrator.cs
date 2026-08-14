@@ -219,6 +219,34 @@ public sealed class OrderInvoiceIntegrator
     {
         var problemas = new List<string>();
 
+        // --- Portón: lo que este integrador todavía no sabe trasladar a SAP ---
+        //
+        // El contrato v0.37.2 agregó invoice_discount_pct y freight_amount, y
+        // este lado no los envía todavía. Sin este portón la factura se crearía
+        // igual, SIN el descuento ni el flete, por un monto MENOR que el
+        // autorizado — y como el contraste contra expected_doc_total corre
+        // DESPUÉS del POST, quedaría una factura irreversible en SAP, la tarea
+        // reportada como integrada, y una línea de error en un log.
+        //
+        // Rechazar es estrictamente mejor: la tarea vuelve con error, nadie
+        // facturó de menos, y queda visible en la cola. Se quita cuando cada
+        // campo esté modelado y verificado contra SAP, no antes.
+        if (snapshot.InvoiceDiscountPct is not null and not 0)
+        {
+            problemas.Add(
+                $"trae invoice_discount_pct={snapshot.InvoiceDiscountPct} y el sincronizador " +
+                "todavía no traslada el descuento de documento a SAP; se rechaza para no facturar " +
+                "por un monto distinto del autorizado");
+        }
+
+        if (snapshot.FreightAmount is not null and not 0)
+        {
+            problemas.Add(
+                $"trae freight_amount={snapshot.FreightAmount} y el sincronizador todavía no " +
+                "traslada el flete a SAP; se rechaza para no facturar por un monto distinto del " +
+                "autorizado");
+        }
+
         if (string.IsNullOrWhiteSpace(snapshot.OrderUuid))
         {
             problemas.Add("sin order_uuid, y sin él no hay anti-duplicado");

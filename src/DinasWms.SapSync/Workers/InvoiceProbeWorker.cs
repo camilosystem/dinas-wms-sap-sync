@@ -108,6 +108,22 @@ public sealed class InvoiceProbeWorker : BackgroundService
             return;
         }
 
+        // NO BORRAR ESTE AGRUPAMIENTO POR item_code.
+        //
+        // El contrato v0.37.2 dice que las líneas van UNA POR LÍNEA DEL PEDIDO,
+        // que item_code puede repetirse, y que no se agrupa por ese campo. Esa
+        // regla gobierna la CONSTRUCCIÓN de la factura — armar el documento
+        // agrupando fue lo que hizo que una promoción "lleve 10, pague 9"
+        // facturara 11 unidades a precio de lista.
+        //
+        // Acá no se está armando ningún documento: se está preguntando cuánto
+        // stock se movió, y el stock se mueve POR ÍTEM, no por línea. Si un ítem
+        // viene en tres entradas, lo que salió del almacén es la suma de las
+        // tres, y compararlo línea por línea daría "NO CUADRA" en una factura
+        // perfecta. Son dos preguntas distintas sobre el mismo dato.
+        //
+        // El integrador —que sí arma el documento— es estrictamente posicional:
+        // ver OrderInvoiceIntegrator, donde BaseLineNumber es el índice.
         var itemCodes = (tarea.OrderInvoice.Lines ?? [])
             .Select(l => l.ItemCode)
             .Where(c => !string.IsNullOrWhiteSpace(c))
