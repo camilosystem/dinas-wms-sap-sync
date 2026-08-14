@@ -60,9 +60,17 @@ public sealed class InvoicesOptions
     /// <c>appsettings.json</c>, y no enterrado en el armado del payload.
     /// </para>
     /// <para>
-    /// En esta empresa hay UN solo código de impuesto de venta —<c>Exempt</c>,
-    /// tasa 0, activo— así que hoy no hay entre qué elegir; pero el día que haya
-    /// dos, la decisión tiene que seguir siendo de quien corresponde.
+    /// <b>Disparador de revisión.</b> Hoy la empresa tiene UN solo código de
+    /// impuesto de venta —<c>Exempt</c>, tasa 0, activo— así que el valor de acá
+    /// es el único válido y confirmarlo es trivial. <b>Deja de serlo en cuanto se
+    /// defina un segundo.</b> Ahí esto vuelve a ser una decisión fiscal de la
+    /// empresa y hay que hacerla tomar de nuevo, no heredarla.
+    /// </para>
+    /// <para>
+    /// Se comprueba en un renglón, sin abrir nada:
+    /// <c>--RunMode=SlDiscovery --Discovery:SkipMetadata=true
+    /// --Discovery:Queries:0=SalesTaxCodes?$select=Code,Name,Rate,Inactive</c>.
+    /// Si devuelve más de un código activo, este valor dejó de ser obvio.
     /// </para>
     /// </remarks>
     public string FreightTaxCode { get; set; } = "";
