@@ -14,28 +14,46 @@
 # nada — que es exactamente lo que paso el 14-ago-2026 y no se detecto hasta
 # tres dias despues.
 #
-# MODO SOLO LECTURA:
+# MODOS:
 #
-#   .\actualizar-servicio.ps1 -SoloVerificar
-#       Compara el binario instalado contra el HEAD del repo y sale. No detiene
-#       el servicio, no publica, no requiere elevacion, no escribe el log.
+#   .\actualizar-servicio.ps1
+#       Despliega. Respalda el binario instalado en .\anterior\, publica,
+#       rearranca, y VERIFICA que lo que quedo instalado sea el commit que se
+#       quiso desplegar.
 #
-#   .\actualizar-servicio.ps1 -SoloVerificar -ShaEsperado <sha40>
-#       Compara contra un SHA explicito. Sirve para verificar contra un commit
-#       que no es HEAD, y para probar la propia asercion.
+#   .\actualizar-servicio.ps1 -Revertir
+#       Restaura el binario de .\anterior\, rearranca, y verifica que lo
+#       restaurado sea exactamente lo que habia respaldado.
+#
+#   .\actualizar-servicio.ps1 -SoloVerificar [-ShaEsperado <sha40>]
+#       Solo lectura. Compara el binario instalado contra el HEAD del repo (o
+#       contra un SHA explicito) y sale. No detiene el servicio, no publica, no
+#       requiere elevacion, no escribe el log.
 
 param(
     [switch] $SoloVerificar,
-    [string] $ShaEsperado
+    [string] $ShaEsperado,
+    [switch] $Revertir,
+    # Solo para el arnes de pruebas: define las funciones y vuelve, sin
+    # ejecutar nada. Permite probar respaldo y restauracion contra directorios
+    # de sandbox, ejercitando ESTAS funciones y no una copia de la logica.
+    [switch] $SoloCargarFunciones
 )
 
 $ErrorActionPreference = 'Stop'
 
 $servicio   = 'DinasWmsSapSync'
 $directorio = 'C:\DinasWmsSapSync'
+$anterior   = Join-Path $directorio 'anterior'
 $repo       = 'C:\Users\Financial Advisor\Pictures\dinas-wms-sap-sync'
 $log        = Join-Path $directorio 'despliegue.log'
 $rutaDll    = Join-Path $directorio 'DinasWms.SapSync.dll'
+
+# Lo que se respalda y se restaura. Lista explicita a proposito: nada de
+# comodines, nada de copiar el directorio entero. sap-sync.db NO esta aca y no
+# debe estarlo — la base guarda configuracion e historial de ciclos, y volver
+# atras el binario no debe volver atras los datos.
+$ArchivosDelBinario = @('DinasWms.SapSync.exe', 'DinasWms.SapSync.dll')
 
 # --- Identidad del binario ---------------------------------------------------
 #
@@ -69,6 +87,10 @@ function Obtener-Git() {
 # no se sabe que esperar— es un fallo: un despliegue que no se puede verificar
 # no es un despliegue confirmado. Los tres casos se distinguen en el mensaje a
 # proposito, porque se arreglan de forma distinta.
+#
+# La usan por igual el despliegue y el repliegue: si el discriminador vale para
+# confirmar que quedo instalado el codigo nuevo, vale para confirmar que quedo
+# instalado el viejo.
 function Verificar-Binario([string]$ruta, [string]$esperado) {
     $instalado = Obtener-ShaDelBinario $ruta
 
@@ -80,7 +102,7 @@ function Verificar-Binario([string]$ruta, [string]$esperado) {
 
     if (-not $esperado) {
         Write-Host ""
-        Write-Host "  NO VERIFICABLE: no se pudo determinar que SHA esperar (git no resolvio)." -ForegroundColor Red
+        Write-Host "  NO VERIFICABLE: no se pudo determinar que SHA esperar." -ForegroundColor Red
         Write-Host "  El binario puede estar bien o mal. Nadie lo sabe." -ForegroundColor Red
         return $false
     }
@@ -97,7 +119,7 @@ function Verificar-Binario([string]$ruta, [string]$esperado) {
         Write-Host ""
         Write-Host "  *** NO COINCIDE ***" -ForegroundColor Red
         Write-Host "  El binario que quedo instalado NO es el que se esperaba." -ForegroundColor Red
-        Write-Host "  No des el despliegue por hecho: lo que corre es otro codigo." -ForegroundColor Red
+        Write-Host "  No des la operacion por hecha: lo que corre es otro codigo." -ForegroundColor Red
         return $false
     }
 
@@ -105,6 +127,81 @@ function Verificar-Binario([string]$ruta, [string]$esperado) {
     Write-Host "  COINCIDE. El binario instalado es exactamente el commit esperado." -ForegroundColor Green
     return $true
 }
+
+# --- Respaldo ----------------------------------------------------------------
+
+# Mira que hay en la carpeta de respaldo SIN tocar nada. Devuelve un objeto con
+# Completo/Faltantes/Sha. Esto es lo que se consulta ANTES de detener el
+# servicio: un respaldo inservible tiene que descubrirse mientras el servicio
+# todavia esta arriba.
+function Inspeccionar-Respaldo([string]$carpeta) {
+    $faltantes = @()
+
+    if (-not (Test-Path $carpeta)) {
+        $faltantes = $ArchivosDelBinario
+    } else {
+        foreach ($a in $ArchivosDelBinario) {
+            if (-not (Test-Path (Join-Path $carpeta $a))) { $faltantes += $a }
+        }
+    }
+
+    $sha = $null
+    if ($faltantes.Count -eq 0) {
+        $sha = Obtener-ShaDelBinario (Join-Path $carpeta 'DinasWms.SapSync.dll')
+    }
+
+    return [pscustomobject]@{
+        Carpeta   = $carpeta
+        Existe    = (Test-Path $carpeta)
+        Faltantes = $faltantes
+        # Completo exige los archivos Y que el DLL declare SHA: un respaldo que
+        # no se puede verificar despues de restaurarlo no sirve como respaldo.
+        Completo  = ($faltantes.Count -eq 0 -and $sha)
+        Sha       = $sha
+    }
+}
+
+# Copia los archivos del binario de un lado a otro y COMPRUEBA cada copia por
+# hash. Una copia interrumpida a la mitad devuelve $false en vez de pasar por
+# buena.
+function Copiar-Binario([string]$desde, [string]$hacia) {
+    if (-not (Test-Path $hacia)) { New-Item -ItemType Directory -Path $hacia | Out-Null }
+
+    $ok = $true
+
+    foreach ($a in $ArchivosDelBinario) {
+        $origen  = Join-Path $desde $a
+        $destino = Join-Path $hacia $a
+
+        if (-not (Test-Path $origen)) {
+            Write-Host "  FALTA en el origen: $a" -ForegroundColor Red
+            $ok = $false
+            continue
+        }
+
+        try {
+            Copy-Item -Path $origen -Destination $destino -Force
+        } catch {
+            Write-Host "  NO SE PUDO COPIAR $a : $($_.Exception.Message)" -ForegroundColor Red
+            $ok = $false
+            continue
+        }
+
+        $hOrigen  = (Get-FileHash $origen  -Algorithm SHA256).Hash
+        $hDestino = (Get-FileHash $destino -Algorithm SHA256).Hash
+
+        if ($hOrigen -ne $hDestino) {
+            Write-Host "  COPIA CORRUPTA: $a no coincide por hash." -ForegroundColor Red
+            $ok = $false
+        } else {
+            Write-Host ("  {0,-26} {1}" -f $a, $hDestino.Substring(0, 16) + "...")
+        }
+    }
+
+    return $ok
+}
+
+if ($SoloCargarFunciones) { return }
 
 # --- Modo solo verificar -----------------------------------------------------
 #
@@ -145,8 +242,19 @@ function Salir([int]$codigo, [string]$mensaje, [string]$color) {
     exit $codigo
 }
 
+function Detener-Servicio() {
+    Write-Host "Deteniendo $servicio..."
+    & sc.exe stop $servicio | Out-Null
+
+    for ($i = 0; $i -lt 30 -and (Get-Service $servicio).Status -ne 'Stopped'; $i++) {
+        Start-Sleep -Seconds 1
+    }
+
+    return ((Get-Service $servicio).Status -eq 'Stopped')
+}
+
 Write-Host ""
-Write-Host "=== Despliegue $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -ForegroundColor Cyan
+Write-Host "=== $(if ($Revertir) { 'REPLIEGUE' } else { 'Despliegue' }) $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -ForegroundColor Cyan
 
 $principal = New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent())
@@ -155,9 +263,72 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administra
     Salir 1 "Esta consola NO es de administrador. Detener un servicio requiere elevacion." 'Red'
 }
 
+# --- Repliegue ---------------------------------------------------------------
+if ($Revertir) {
+    Write-Host "Inspeccionando el respaldo en $anterior..."
+    $insp = Inspeccionar-Respaldo $anterior
+
+    # EL ORDEN IMPORTA. Esto corre ANTES de detener el servicio, para que un
+    # respaldo ausente o incompleto —la primera vez, o si alguien borro la
+    # carpeta— falle con el servicio todavia ARRIBA. Nunca dejar la maquina
+    # detenida creyendo que restauro algo.
+    if (-not $insp.Completo) {
+        Write-Host ""
+        Write-Host "  NO HAY UN RESPALDO UTILIZABLE. No se toco el servicio." -ForegroundColor Red
+        if (-not $insp.Existe) {
+            Write-Host "  La carpeta $anterior no existe." -ForegroundColor Red
+            Write-Host "  Se crea en el primer despliegue: si nunca desplegaste con" -ForegroundColor Red
+            Write-Host "  este script, no hay nada a lo que volver." -ForegroundColor Red
+        } elseif ($insp.Faltantes.Count -gt 0) {
+            Write-Host "  Faltan archivos: $($insp.Faltantes -join ', ')" -ForegroundColor Red
+        } else {
+            Write-Host "  El DLL respaldado no declara SHA: no habria forma de" -ForegroundColor Red
+            Write-Host "  confirmar que la restauracion quedo bien." -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "  El servicio sigue como estaba: $((Get-Service $servicio).Status)" -ForegroundColor Yellow
+        Salir 1 "Repliegue ABORTADO. Nada que restaurar." 'Red'
+    }
+
+    Write-Host "  Respaldo completo. SHA respaldado: $($insp.Sha)"
+
+    if (-not (Detener-Servicio)) {
+        Salir 1 "No se detuvo a tiempo. Abortando para no restaurar sobre un binario en uso." 'Red'
+    }
+
+    Write-Host "Restaurando..."
+    $copiado = Copiar-Binario $anterior $directorio
+
+    # Se rearranca pase lo que pase con la copia: dejar el servicio abajo es
+    # peor que dejarlo arriba con un binario dudoso, y la asercion de abajo va
+    # a decir exactamente cual quedo.
+    Write-Host "Arrancando..."
+    & sc.exe start $servicio | Out-Null
+    Start-Sleep -Seconds 10
+
+    $svc = Get-Service $servicio
+    Write-Host "  Estado:   $($svc.Status)"
+
+    if (-not $copiado) {
+        Write-Host "  LA COPIA FALLO O QUEDO A MEDIAS." -ForegroundColor Red
+    }
+
+    # La misma asercion que el despliegue, esperando el SHA del binario
+    # respaldado. Una restauracion a medias no se puede dar por buena.
+    $verificado = Verificar-Binario $rutaDll $insp.Sha
+
+    if ($svc.Status -eq 'Running' -and $copiado -and $verificado) {
+        Salir 0 "Repliegue OK y VERIFICADO — corriendo $($insp.Sha)" 'Green'
+    } else {
+        Salir 1 "Repliegue INCOMPLETO o NO VERIFICADO. Ver arriba." 'Red'
+    }
+}
+
+# --- Despliegue --------------------------------------------------------------
+
 # Deja anotado QUE se esta desplegando, y captura el SHA completo que despues
 # tiene que declarar el binario. Sin esto no hay contra que verificar.
-$commit    = 'desconocido'
+$commit     = 'desconocido'
 $shaDestino = $null
 $git = Obtener-Git
 if ($git) {
@@ -167,15 +338,21 @@ if ($git) {
 Write-Host "  Commit a desplegar: $commit"
 Write-Host "  SHA esperado:       $(if ($shaDestino) { $shaDestino } else { '(git no resolvio — el despliegue no se podra verificar)' })"
 
-Write-Host "Deteniendo $servicio..."
-& sc.exe stop $servicio | Out-Null
-
-for ($i = 0; $i -lt 30 -and (Get-Service $servicio).Status -ne 'Stopped'; $i++) {
-    Start-Sleep -Seconds 1
+if (-not (Detener-Servicio)) {
+    Salir 1 "No se detuvo a tiempo. Abortando para no publicar sobre un binario en uso." 'Red'
 }
 
-if ((Get-Service $servicio).Status -ne 'Stopped') {
-    Salir 1 "No se detuvo a tiempo. Abortando para no publicar sobre un binario en uso." 'Red'
+# Respaldo ANTES de publicar. `dotnet publish -o` sobrescribe en el sitio: si no
+# se copia ahora, el binario anterior deja de existir y no hay camino de vuelta.
+Write-Host "Respaldando el binario actual en $anterior..."
+if (-not (Copiar-Binario $directorio $anterior)) {
+    Write-Host ""
+    Write-Host "EL RESPALDO FALLO. No se publica: un despliegue del que no se puede" -ForegroundColor Red
+    Write-Host "volver no vale el riesgo." -ForegroundColor Red
+    Write-Host "Rearrancando el binario actual, que sigue intacto..."
+    & sc.exe start $servicio | Out-Null
+    Start-Sleep -Seconds 5
+    Salir 1 "Despliegue ABORTADO antes de tocar nada. Sigue corriendo el binario de siempre." 'Red'
 }
 
 Write-Host "Publicando..."
@@ -233,7 +410,11 @@ try {
 $verificado = Verificar-Binario $rutaDll $shaDestino
 
 if ($svc.Status -eq 'Running' -and $edad.TotalMinutes -le 10 -and $verificado) {
+    Write-Host ""
+    Write-Host "  Para volver atras: .\actualizar-servicio.ps1 -Revertir" -ForegroundColor Cyan
     Salir 0 "Despliegue OK y VERIFICADO — $commit" 'Green'
 } else {
+    Write-Host ""
+    Write-Host "  Para volver atras: .\actualizar-servicio.ps1 -Revertir" -ForegroundColor Cyan
     Salir 1 "Despliegue INCOMPLETO o NO VERIFICADO. Ver arriba." 'Red'
 }
