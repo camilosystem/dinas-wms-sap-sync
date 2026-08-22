@@ -37,7 +37,12 @@ param(
     # Solo para el arnes de pruebas: define las funciones y vuelve, sin
     # ejecutar nada. Permite probar respaldo y restauracion contra directorios
     # de sandbox, ejercitando ESTAS funciones y no una copia de la logica.
-    [switch] $SoloCargarFunciones
+    [switch] $SoloCargarFunciones,
+    # Solo para el arnes de pruebas: reemplaza la lista de rutas donde buscar
+    # git, para poder comprobar que el script dice NO VERIFICABLE cuando NINGUNA
+    # resuelve. Encontrar git no puede ser la unica forma de que un despliegue
+    # se de por bueno, y eso hay que poder demostrarlo.
+    [string[]] $CandidatosGit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -71,13 +76,63 @@ function Obtener-ShaDelBinario([string]$ruta) {
     return $null
 }
 
-# Resuelve git. Vive en el LOCALAPPDATA del usuario, asi que en una consola
-# elevada de otra cuenta puede no resolver.
+# Resuelve git. Ojo con las DOS trampas, las dos vistas en la corrida real del
+# 21-ago-2026, que dejaron la verificacion en "NO VERIFICABLE" sobre un
+# despliegue que en realidad habia salido bien:
+#
+#   1. La consola elevada corre como DINAS\Administrator, NO como el usuario
+#      que instalo git. $env:LOCALAPPDATA apunta entonces al perfil de
+#      Administrator, donde no hay git. Por eso la lista incluye la ruta
+#      absoluta del perfil que si lo tiene, ademas de la variable.
+#   2. git se niega a operar sobre un repo de OTRO usuario ("detected dubious
+#      ownership"). Se resuelve en Invocar-Git.
+function Obtener-CandidatosGit() {
+    # El arnes de pruebas puede reemplazar la lista entera.
+    if ($CandidatosGit -and $CandidatosGit.Count -gt 0) { return $CandidatosGit }
+
+    $lista = @()
+
+    $enPath = (Get-Command git -ErrorAction SilentlyContinue).Source
+    if ($enPath) { $lista += $enPath }
+
+    $lista += "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe"
+    $lista += 'C:\Users\Financial Advisor\AppData\Local\Programs\Git\cmd\git.exe'
+    $lista += 'C:\Program Files\Git\cmd\git.exe'
+
+    return $lista
+}
+
 function Obtener-Git() {
-    $g = (Get-Command git -ErrorAction SilentlyContinue).Source
-    if (-not $g) { $g = "$env:LOCALAPPDATA\Programs\Git\cmd\git.exe" }
-    if (Test-Path $g) { return $g }
+    foreach ($c in (Obtener-CandidatosGit)) {
+        if ($c -and (Test-Path $c)) { return $c }
+    }
     return $null
+}
+
+# Corre git contra el repo y devuelve la salida, o $null si no se pudo. Que
+# devuelva $null es una respuesta legitima: quien llama tiene que tratarla como
+# "no se sabe", nunca como "esta bien".
+#
+# safe.directory se pasa acotado a ESTE repo —no con comodin— porque el proceso
+# elevado corre como Administrator y el repo es del usuario Financial Advisor;
+# sin eso git aborta por "dubious ownership" aunque el ejecutable si resuelva.
+function Invocar-Git([string[]]$argumentos) {
+    $git = Obtener-Git
+    if (-not $git) { return $null }
+
+    try {
+        $salida = & $git -c "safe.directory=$repo" -C $repo @argumentos 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  git respondio error (exit $LASTEXITCODE): $(($salida -join ' ').Trim())" -ForegroundColor Yellow
+            return $null
+        }
+
+        return ($salida -join '').Trim()
+    } catch {
+        Write-Host "  git lanzo una excepcion: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
 }
 
 # --- LA ASERCION -------------------------------------------------------------
@@ -213,8 +268,8 @@ if ($SoloVerificar) {
     $esperado = $ShaEsperado
 
     if (-not $esperado) {
-        $git = Obtener-Git
-        if ($git) { $esperado = (& $git -C $repo rev-parse HEAD) -join '' }
+        Write-Host "  git: $(if (Obtener-Git) { Obtener-Git } else { 'NO RESUELVE en ninguna ruta conocida' })"
+        $esperado = Invocar-Git @('rev-parse', 'HEAD')
     }
 
     if (Verificar-Binario $rutaDll $esperado) { exit 0 } else { exit 1 }
@@ -328,13 +383,12 @@ if ($Revertir) {
 
 # Deja anotado QUE se esta desplegando, y captura el SHA completo que despues
 # tiene que declarar el binario. Sin esto no hay contra que verificar.
-$commit     = 'desconocido'
-$shaDestino = $null
 $git = Obtener-Git
-if ($git) {
-    $commit     = (& $git -C $repo log -1 --pretty='%h %ad %s' --date=short) -join ''
-    $shaDestino = (& $git -C $repo rev-parse HEAD) -join ''
-}
+Write-Host "  git:                $(if ($git) { $git } else { 'NO RESUELVE en ninguna ruta conocida' })"
+
+$shaDestino = Invocar-Git @('rev-parse', 'HEAD')
+$commit     = Invocar-Git @('log', '-1', '--pretty=%h %ad %s', '--date=short')
+if (-not $commit) { $commit = 'desconocido' }
 Write-Host "  Commit a desplegar: $commit"
 Write-Host "  SHA esperado:       $(if ($shaDestino) { $shaDestino } else { '(git no resolvio — el despliegue no se podra verificar)' })"
 
