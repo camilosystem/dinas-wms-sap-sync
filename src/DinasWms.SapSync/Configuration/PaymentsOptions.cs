@@ -38,6 +38,31 @@ public sealed class PaymentsOptions
     public string TransferReference { get; set; } = "ACH";
 
     /// <summary>
+    /// <c>task_id</c> que este sincronizador NO debe intentar integrar.
+    /// </summary>
+    /// <remarks>
+    /// Es una lista de <b>identificadores exactos</b>, nunca un criterio ancho:
+    /// una exclusión demasiado amplia se ve idéntica a una correcta mientras no
+    /// haya un segundo caso, y para entonces ya dejó de facturar cosas que sí
+    /// debía. Cada número acá es una decisión tomada sobre UNA tarea concreta.
+    ///
+    /// <para>
+    /// Una tarea omitida NO se reporta al middleware: sigue PENDIENTE en la cola,
+    /// con su payload y su <c>error_detail</c> intactos, que son la evidencia del
+    /// bloque de trabajo que la dejó trabada. Lo único que cambia es que este
+    /// proceso deja de intentarla, y por lo tanto deja de contarla como fallo.
+    /// </para>
+    ///
+    /// <para>
+    /// La omisión se publica en <c>/api/estado</c> a propósito. Cambiar un rojo
+    /// permanente por una omisión silenciosa sería peor que el rojo: el verde
+    /// pasaría a significar "todo bien salvo lo que decidimos no mirar". Vaciar
+    /// la lista devuelve la tarea al ciclo sin tocar nada más.
+    /// </para>
+    /// </remarks>
+    public int[] TaskIdsOmitidos { get; set; } = [];
+
+    /// <summary>
     /// Devuelve la cuenta del método indicado, o lanza si no está configurada.
     /// </summary>
     public string RequireAccountFor(string metodo)

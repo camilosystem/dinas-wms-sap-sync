@@ -30,20 +30,71 @@ public sealed class IncomingPaymentsSyncStep : IDocumentSyncStep
     private readonly IDocEntryResolver _resolver;
     private readonly PaymentsOptions _paymentsOptions;
     private readonly MiddlewareOptions _middlewareOptions;
+    private readonly Observability.SyncStatus? _status;
     private readonly ILogger<IncomingPaymentsSyncStep> _logger;
+
+    /// <summary>Última omisión anunciada, para no repetir el aviso en cada sondeo.</summary>
+    private string _ultimaOmisionAnunciada = "";
 
     public IncomingPaymentsSyncStep(
         IMiddlewareClient middleware,
         IDocEntryResolver resolver,
         IOptions<PaymentsOptions> paymentsOptions,
         IOptions<MiddlewareOptions> middlewareOptions,
-        ILogger<IncomingPaymentsSyncStep> logger)
+        ILogger<IncomingPaymentsSyncStep> logger,
+        Observability.SyncStatus? status = null)
     {
         _middleware = middleware;
         _resolver = resolver;
         _paymentsOptions = paymentsOptions.Value;
         _middlewareOptions = middlewareOptions.Value;
+        _status = status;
         _logger = logger;
+
+        // La decisión vigente se publica desde el arranque, aunque ninguna de
+        // esas tareas esté hoy en la cola. Es lo que impide que la omisión sea
+        // invisible mientras no se la ejercite.
+        _status?.RegistrarOmisionConfigurada(_paymentsOptions.TaskIdsOmitidos ?? []);
+    }
+
+    /// <summary>
+    /// Separa las tareas que hay que intentar de las omitidas por configuración.
+    /// </summary>
+    /// <remarks>
+    /// Función pura y pública para poder comprobar la propiedad que importa: que
+    /// excluye el <c>task_id</c> exacto y <b>ninguno más</b>. Una exclusión
+    /// demasiado ancha se ve idéntica a una correcta mientras haya una sola
+    /// tarea en la cola.
+    /// </remarks>
+    public static (List<SapAccountPaymentSyncTask> AProcesar, List<int> Omitidas) RepartirPorOmision(
+        IReadOnlyList<SapAccountPaymentSyncTask> tareas,
+        IReadOnlyCollection<int>? taskIdsOmitidos)
+    {
+        if (taskIdsOmitidos is null || taskIdsOmitidos.Count == 0)
+        {
+            // Lista vacía ⇒ no se omite nada. Es la vuelta atrás: vaciar la
+            // configuración devuelve las tareas al ciclo sin tocar nada más.
+            return (tareas.ToList(), []);
+        }
+
+        var omitir = new HashSet<int>(taskIdsOmitidos);
+
+        var aProcesar = new List<SapAccountPaymentSyncTask>(tareas.Count);
+        var omitidas = new List<int>();
+
+        foreach (var t in tareas)
+        {
+            if (omitir.Contains(t.TaskId))
+            {
+                omitidas.Add(t.TaskId);
+            }
+            else
+            {
+                aProcesar.Add(t);
+            }
+        }
+
+        return (aProcesar, omitidas);
     }
 
     public string Name => "IncomingPayments";
@@ -159,8 +210,49 @@ public sealed class IncomingPaymentsSyncStep : IDocumentSyncStep
         }
 
         var tareas = pagina?.Tasks ?? [];
-        _logger.LogInformation("El middleware reporta {Cuantas} tarea(s) pendiente(s).", tareas.Count);
-        return tareas;
+
+        // El filtro va acá y no en ExecuteAsync a propósito: esta misma consulta
+        // es la que usa HasPendingWorkAsync. Si lo único pendiente está omitido,
+        // el worker ve "sin trabajo", no abre sesión con SAP, y su contador de
+        // fallos consecutivos vuelve a cero solo. Filtrar más adelante dejaría
+        // un ciclo corriendo en vacío cada 20 segundos.
+        var (aProcesar, omitidas) = RepartirPorOmision(tareas, _paymentsOptions.TaskIdsOmitidos);
+
+        _status?.RegistrarOmitidasEnLaCola(omitidas);
+
+        var firma = string.Join(",", omitidas);
+
+        if (firma != _ultimaOmisionAnunciada)
+        {
+            _ultimaOmisionAnunciada = firma;
+
+            if (omitidas.Count > 0)
+            {
+                // Warning y no Information: que algo se esté salteando tiene que
+                // saltar a la vista de quien lee el log, no esconderse en el ruido.
+                _logger.LogWarning(
+                    "OMITIDAS por configuración ({Cuantas}): task_id {Ids}. Siguen PENDIENTES en la " +
+                    "cola, con su payload y su error_detail intactos; este proceso no las intenta y " +
+                    "no las cuenta como fallo. Se devuelven al ciclo vaciando {Seccion}:{Opcion}.",
+                    omitidas.Count,
+                    firma,
+                    PaymentsOptions.SectionName,
+                    nameof(PaymentsOptions.TaskIdsOmitidos));
+            }
+            else
+            {
+                _logger.LogInformation("Ya no hay tareas omitidas por configuración en la cola.");
+            }
+        }
+
+        _logger.LogInformation(
+            "El middleware reporta {Cuantas} tarea(s) pendiente(s){Detalle}.",
+            tareas.Count,
+            omitidas.Count == 0
+                ? ""
+                : $", de las cuales {omitidas.Count} omitida(s) por configuración");
+
+        return aProcesar;
     }
 
     /// <summary>Procesa una tarea. Devuelve true si quedó integrada.</summary>

@@ -82,6 +82,16 @@ public static class ApiEndpoints
                 ultimoCiclo = estado.UltimoCiclo,
                 proximoIntento = estado.ProximoIntento,
                 ultimoResultado = estado.UltimoResultado,
+                // Una omisión que no se ve convierte el verde en una mentira
+                // cómoda: "todo bien" pasaría a significar "todo bien salvo lo
+                // que decidimos no mirar". Va al lado de los contadores, no
+                // escondido, y se publica aunque hoy no haya ninguna en la cola.
+                omitidas = new
+                {
+                    cuantas = estado.OmitidasEnLaCola.Count,
+                    enLaCola = estado.OmitidasEnLaCola,
+                    configuradas = estado.OmitidasConfiguradas,
+                },
                 cicloEnCurso = ocupante is null
                     ? null
                     : new { titular = ocupante.Value.Titular, desde = ocupante.Value.Desde },

@@ -40,6 +40,9 @@ public sealed class SyncStatus
 
     private CicloTerminado? _ultimoResultado;
 
+    private IReadOnlyList<int> _omitidasConfiguradas = [];
+    private IReadOnlyList<int> _omitidasEnLaCola = [];
+
     public SyncStatus(TimeProvider timeProvider) => IniciadoEn = timeProvider.GetLocalNow();
 
     /// <summary>Cuándo arrancó el proceso.</summary>
@@ -149,6 +152,31 @@ public sealed class SyncStatus
 
     public void RegistrarFallosConsecutivos(int fallos) =>
         Volatile.Write(ref _fallosConsecutivos, fallos);
+
+    // --- Tareas omitidas por configuración -----------------------------------
+    //
+    // Existe para que una omisión NO sea silenciosa. Sacar una tarea del ciclo
+    // de reintentos arregla el síntoma —el monitor deja de estar en rojo— pero
+    // si la exclusión no aparece en ningún lado, el verde pasa a significar
+    // "todo bien salvo lo que decidimos no mirar", que es peor que el rojo:
+    // el rojo al menos se ve. Por eso se publican las DOS listas.
+
+    /// <summary>
+    /// <c>task_id</c> configurados para omitirse. Se publica aunque ninguno esté
+    /// hoy en la cola: es la decisión vigente, no una observación.
+    /// </summary>
+    public IReadOnlyList<int> OmitidasConfiguradas => Volatile.Read(ref _omitidasConfiguradas);
+
+    /// <summary>
+    /// De esos, los que el último sondeo encontró realmente en la cola y saltó.
+    /// </summary>
+    public IReadOnlyList<int> OmitidasEnLaCola => Volatile.Read(ref _omitidasEnLaCola);
+
+    public void RegistrarOmisionConfigurada(IReadOnlyList<int> ids) =>
+        Volatile.Write(ref _omitidasConfiguradas, ids);
+
+    public void RegistrarOmitidasEnLaCola(IReadOnlyList<int> ids) =>
+        Volatile.Write(ref _omitidasEnLaCola, ids);
 }
 
 /// <summary>Resumen del último ciclo, para la pantalla.</summary>
